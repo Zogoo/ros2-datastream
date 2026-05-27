@@ -53,7 +53,7 @@ EVENTS = [
 
 WHEEL_RADIUS  = 0.07   # m
 TRACK_WIDTH   = 0.35   # m
-MANUAL_TIMEOUT = 1.0   # s — resume auto loop if no cmd_vel received
+MANUAL_TIMEOUT = 3.0   # s — resume auto loop if no cmd_vel received
 
 # Room bounds (same as lidar_generator room)
 ROOM_HALF_X = 2.3

@@ -1,0 +1,193 @@
+---
+description: Quality checks for the onsen-robot ROS2 + frontend stack. Run this when asked to "quality check", "QA", or "review the stack".
+globs:
+alwaysApply: false
+---
+
+# Onsen Robot — Quality Check Procedure
+
+Run every section below in order. Report PASS / FAIL / WARN per item. Stop a section early only if the failure makes the rest of it meaningless.
+
+---
+
+## 1. Python static analysis
+
+```bash
+# Install checkers if missing (inside the repo, not system-wide)
+pip install --quiet ruff mypy 2>/dev/null
+
+# Style + logic errors — both packages
+ruff check src/onsen_ai_worker src/onsen_dummy_robot
+
+# Type check AI worker (the more complex node)
+mypy src/onsen_ai_worker/onsen_ai_worker/ai_worker_node.py \
+     --ignore-missing-imports --no-strict-optional
+```
+
+PASS criteria:
+- `ruff` exits 0 (no errors, warnings acceptable)
+- `mypy` reports no `error:` lines (notes/warnings OK)
+
+---
+
+## 2. Topic contract consistency
+
+The publisher side (dummy_stream_node.py) and subscriber side (ai_worker_node.py + app.js) must agree on every topic name and message type. Check these pairs:
+
+| Topic | Publisher type | Subscriber(s) |
+|---|---|---|
+| `/camera/front/image_raw` | `sensor_msgs/Image` | ai_worker_node |
+| `/camera/front/image_raw/compressed` | `sensor_msgs/CompressedImage` | app.js via rosbridge |
+| `/scan` | `sensor_msgs/LaserScan` | app.js |
+| `/odom` | `nav_msgs/Odometry` | app.js |
+| `/joint_states` | `sensor_msgs/JointState` | app.js |
+| `/arm/state` | `std_msgs/String` (JSON) | app.js |
+| `/arm/action` | `std_msgs/String` (JSON) | dummy_stream_node |
+| `/cmd_vel` | `geometry_msgs/Twist` | dummy_stream_node |
+| `/detected_objects` | `std_msgs/String` (JSON) | app.js |
+| `/task_plan` | `std_msgs/String` (JSON) | app.js |
+| `/robot/events` | `std_msgs/String` (JSON) | app.js |
+| `/robot/control_mode` | `std_msgs/String` (JSON) | app.js |
+
+```bash
+grep -n "create_publisher\|create_subscription" \
+  src/onsen_dummy_robot/onsen_dummy_robot/dummy_stream_node.py \
+  src/onsen_ai_worker/onsen_ai_worker/ai_worker_node.py
+
+grep -n "new ROSLIB.Topic\|messageType" frontend/js/app.js
+```
+
+PASS criteria: every topic in the table above appears in both publisher and subscriber with matching message type strings.
+
+---
+
+## 3. JSON schema spot-check (std_msgs/String payloads)
+
+Each JSON topic has an implicit schema. Verify the keys are consistent between producer and consumer:
+
+```bash
+# arm/state producer keys vs consumer keys
+grep -n "arm_state\|state.*cycle\|success_prob" \
+  src/onsen_dummy_robot/onsen_dummy_robot/arm_state_machine.py
+grep -n "arm-state-val\|arm-cycle\|arm-prob\|armState" frontend/js/app.js
+
+# task_plan keys
+grep -n '"next_action"\|"reason"\|"target_object_id"' \
+  src/onsen_ai_worker/onsen_ai_worker/ai_worker_node.py
+grep -n "task-action\|task-reason\|taskPlan" frontend/js/app.js
+
+# detected_objects keys
+grep -n '"objects"\|"confidence"\|"class"\|"bbox"' \
+  src/onsen_ai_worker/onsen_ai_worker/ai_worker_node.py
+grep -n "\.confidence\|\.class\|detect" frontend/js/app.js
+```
+
+PASS criteria: every key written by the publisher is read by the consumer (no silent typos).
+
+---
+
+## 4. Docker build validation
+
+```bash
+# Dry-run the ROS workspace build (no daemon needed)
+docker build --target=build . --no-cache 2>&1 | tail -30
+# If no multi-stage, just validate the Dockerfile parses:
+docker build -f Dockerfile . --dry-run 2>/dev/null || \
+  docker buildx build -f Dockerfile . --no-cache --progress=plain 2>&1 | grep -E "^#|ERROR|WARN" | head -40
+
+# Frontend image
+docker build -f frontend/Dockerfile frontend/ --no-cache 2>&1 | tail -20
+```
+
+PASS criteria: both builds exit 0. WARN on cache-only failures if network is unavailable.
+
+---
+
+## 5. Docker Compose schema validation
+
+```bash
+docker compose config --quiet && echo "compose: VALID" || echo "compose: INVALID"
+docker compose config 2>&1 | grep -iE "warn|error|invalid"
+```
+
+Check that:
+- All services that need ROS have `<<: *ros-env`
+- `ai_worker` depends_on `dummy_robot`
+- `frontend` depends_on `rosbridge`
+- `rosbag_recorder` and `rosbag_player` are under `profiles: [record]` / `profiles: [play]`
+
+---
+
+## 6. Upload endpoint reachability (static analysis)
+
+Verify the upload path is wired end-to-end without running Docker:
+
+```bash
+# nginx proxy block exists
+grep -n "api" frontend/nginx.conf
+
+# ai_worker starts HTTP server
+grep -n "_start_upload_server\|HTTPServer\|5000" \
+  src/onsen_ai_worker/onsen_ai_worker/ai_worker_node.py
+
+# frontend calls /api/upload
+grep -n "api/upload\|setupUploadButton" frontend/js/app.js
+```
+
+PASS criteria: all three locations confirm the path exists.
+
+---
+
+## 7. Frontend JS sanity
+
+```bash
+# No obvious undefined references to DOM IDs that don't exist in HTML
+node -e "
+const fs = require('fs');
+const html = fs.readFileSync('frontend/index.html','utf8');
+const js   = fs.readFileSync('frontend/js/app.js','utf8');
+const ids  = [...html.matchAll(/id=\"([\w-]+)\"/g)].map(m=>m[1]);
+const gets = [...js.matchAll(/getElementById\(['\"]+([\w-]+)['\"]+\)/g)].map(m=>m[1]);
+const missing = gets.filter(id => !ids.includes(id));
+if (missing.length) { console.log('MISSING IDs:', missing); process.exit(1); }
+else console.log('All getElementById calls resolve — PASS');
+"
+```
+
+PASS criteria: script exits 0.
+
+---
+
+## 8. Arm state machine completeness
+
+```bash
+# Every state the UI can request must be handled by the state machine
+grep -n "data-state=" frontend/index.html
+grep -n "ArmState\.\|force_state\|HOME\|SEARCH\|GRIP\|LIFT\|DROP" \
+  src/onsen_dummy_robot/onsen_dummy_robot/arm_state_machine.py
+```
+
+PASS criteria: every `data-state` value in the HTML appears as an `ArmState` enum member.
+
+---
+
+## 9. Summary report format
+
+After running all sections, output a table:
+
+```
+SECTION                        STATUS   NOTES
+─────────────────────────────────────────────────────
+1. Python static analysis      PASS
+2. Topic contract              PASS
+3. JSON schema spot-check      WARN     <specific key if mismatch>
+4. Docker build                PASS
+5. Docker Compose schema       PASS
+6. Upload endpoint             PASS
+7. Frontend JS sanity          PASS
+8. Arm state machine           PASS
+─────────────────────────────────────────────────────
+OVERALL                        PASS     (or FAIL if any FAIL)
+```
+
+For every FAIL or WARN, add a one-line fix suggestion directly below the table row.

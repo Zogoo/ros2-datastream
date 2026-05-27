@@ -82,6 +82,7 @@ function main() {
   setupArmButtons();
   setupViewModeButtons();
   setupShutterButton();
+  setupUploadButton();
   animate();
   clockTick();
 }
@@ -802,6 +803,47 @@ function setConnStatus(ok) {
   el.textContent  = ok ? '● CONNECTED' : '● DISCONNECTED';
   el.className    = ok ? 'ok' : 'err';
   state.connected = ok;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Image upload → AI worker
+// ════════════════════════════════════════════════════════════════════════════════
+
+function setupUploadButton() {
+  const btn   = document.getElementById('upload-btn');
+  const input = document.getElementById('upload-input');
+  if (!btn || !input) return;
+
+  btn.addEventListener('click', () => input.click());
+
+  input.addEventListener('change', async () => {
+    const file = input.files[0];
+    input.value = '';
+    if (!file) return;
+
+    btn.textContent = '… UPLOADING';
+    btn.disabled = true;
+    showEventTicker('UPLOADING IMAGE…');
+
+    try {
+      const resp = await fetch('/api/upload', {
+        method:  'POST',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body:    file,
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      state.detections = data.objects || [];
+      updateDetectHUD();
+      const n = state.detections.length;
+      showEventTicker(`UPLOAD: ${n} OBJECT${n !== 1 ? 'S' : ''} DETECTED`);
+    } catch (e) {
+      showEventTicker('UPLOAD FAILED — is ai_worker running?');
+    } finally {
+      btn.textContent = '⬆ UPLOAD';
+      btn.disabled = false;
+    }
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
