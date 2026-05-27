@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m py_compile src/onsen_dummy_robot/onsen_dummy_robot/scene_generator.py src/onsen_dummy_robot/onsen_dummy_robot/lidar_generator.py src/onsen_dummy_robot/onsen_dummy_robot/arm_state_machine.py src/onsen_dummy_robot/onsen_dummy_robot/dummy_stream_node.py src/onsen_ai_worker/onsen_ai_worker/ai_worker_node.py)",
+      "Bash(python3 -m py_compile /home/zogoo/robotics-workspace/ros2-datastream/onsen_robot_data_stream/src/onsen_dummy_robot/onsen_dummy_robot/dummy_stream_node.py /home/zogoo/robotics-workspace/ros2-datastream/onsen_robot_data_stream/src/onsen_dummy_robot/onsen_dummy_robot/arm_state_machine.py)",
+      "Bash(docker compose *)",
+      "WebSearch",
+      "Bash(docker run *)",
+      "Read(//usr/share/nginx/html/libs/**)"
+    ]
+  }
+}

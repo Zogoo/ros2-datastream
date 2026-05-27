@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from onsen_dummy_robot.dummy_stream_node import main
+main()

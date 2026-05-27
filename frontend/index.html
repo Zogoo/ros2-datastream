@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Onsen Robot — Live View</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three":         "/libs/three.module.min.js",
+      "three/addons/": "/libs/addons/"
+    }
+  }
+  </script>
+  <script src="/libs/roslib.min.js"></script>
+</head>
+<body>
+
+<!-- ── Status bar ───────────────────────────────────────────────────────── -->
+<div id="status-bar">
+  <span id="conn-status" class="err">● DISCONNECTED</span>
+  <span id="ctrl-mode-badge" class="badge-auto">AUTO</span>
+  <span id="robot-name">ONSEN ROBOT</span>
+  <span id="clock">--:--:--</span>
+  <span id="rec-indicator">◉ LIVE</span>
+  <span id="pub-counter" style="color:#555;font-size:9px;letter-spacing:1px">TX:0</span>
+</div>
+
+<!-- ── Main viewfinder ──────────────────────────────────────────────────── -->
+<div id="viewfinder">
+
+  <!-- Rule-of-thirds grid -->
+  <div id="focus-grid">
+    <div class="grid-line grid-h"></div>
+    <div class="grid-line grid-h"></div>
+    <div class="grid-line grid-v"></div>
+    <div class="grid-line grid-v"></div>
+  </div>
+
+  <!-- Focus brackets -->
+  <div id="focus-brackets">
+    <div class="brackets-inner">
+      <div class="bracket tl"></div>
+      <div class="bracket tr"></div>
+      <div class="bracket bl"></div>
+      <div class="bracket br"></div>
+    </div>
+  </div>
+
+  <!-- Arm state HUD — top-left -->
+  <div class="hud-panel" id="hud-arm">
+    <div class="hud-label">ARM STATE</div>
+    <div id="arm-state-val">HOME</div>
+    <div id="arm-cycle">CYCLE: 0</div>
+    <div id="arm-prob">PROB: 1.00</div>
+  </div>
+
+  <!-- Detection HUD — top-right -->
+  <div class="hud-panel" id="hud-detect">
+    <div class="hud-label">DETECTIONS</div>
+    <div id="detect-count">0 objects</div>
+    <div id="detect-list"></div>
+  </div>
+
+  <!-- Event ticker -->
+  <div id="event-ticker"></div>
+
+  <!-- Pose bar -->
+  <div id="pose-bar">
+    X:<span id="px">0.00</span> Y:<span id="py">0.00</span> YAW:<span id="pyaw">0.00</span>
+  </div>
+
+  <!-- ── D-pad movement control ──────────────────────────────────────────── -->
+  <div id="dpad" title="W/S/A/D or arrow keys">
+    <button class="dpad-btn dpad-fwd"   id="dpad-fwd"  >▲</button>
+    <button class="dpad-btn dpad-left"  id="dpad-left" >◄</button>
+    <button class="dpad-btn dpad-stop"  id="dpad-stop" >■</button>
+    <button class="dpad-btn dpad-right" id="dpad-right">►</button>
+    <button class="dpad-btn dpad-back"  id="dpad-back" >▼</button>
+  </div>
+
+  <!-- LiDAR minimap — bottom-right -->
+  <div id="lidar-panel">
+    <div class="panel-label">LIDAR  360°</div>
+    <canvas id="lidar-canvas" width="160" height="160"></canvas>
+  </div>
+
+  <!-- Camera PiP — bottom-left -->
+  <div id="cam-panel">
+    <div class="panel-label">CAM  FPV</div>
+    <img id="cam-feed" class="no-signal" alt="no signal" />
+  </div>
+
+</div><!-- /viewfinder -->
+
+<!-- ── Primary control bar ──────────────────────────────────────────────── -->
+<div id="control-bar">
+  <div id="view-modes">
+    <button class="mode-btn active" data-mode="orbit" >ORBIT</button>
+    <button class="mode-btn"        data-mode="follow">FOLLOW</button>
+    <button class="mode-btn"        data-mode="fps"   >FPS</button>
+  </div>
+  <button id="shutter-btn" title="Toggle recording">◉</button>
+  <div id="task-display">
+    <div id="task-action">SEARCH</div>
+    <div id="task-reason" style="font-size:9px;color:#555">waiting…</div>
+  </div>
+</div>
+
+<!-- ── Arm state bar ────────────────────────────────────────────────────── -->
+<div id="arm-bar">
+  <span class="bar-label">ARM:</span>
+  <div id="arm-state-btns">
+    <button class="arm-btn" data-state="HOME"           title="1">HOME</button>
+    <button class="arm-btn" data-state="SEARCH"         title="2">SRCH</button>
+    <button class="arm-btn" data-state="APPROACH_OBJECT"title="3">APPR</button>
+    <button class="arm-btn" data-state="LOWER_TO_TOWEL" title="4">LOWR</button>
+    <button class="arm-btn" data-state="GRIP"           title="5">GRIP</button>
+    <button class="arm-btn" data-state="LIFT"           title="6">LIFT</button>
+    <button class="arm-btn" data-state="DROP_TO_TRAY"   title="7">DROP</button>
+  </div>
+  <button id="joints-toggle" class="mode-btn">JOINTS ▾</button>
+</div>
+
+<!-- ── Joint sliders panel (hidden until toggled) ───────────────────────── -->
+<div id="joint-panel" class="hidden">
+  <!-- Populated by app.js -->
+</div>
+
+<!-- ── Keyboard help ────────────────────────────────────────────────────── -->
+<div id="kb-help">WASD / ↑↓←→ move &nbsp;|&nbsp; 1-7 arm state &nbsp;|&nbsp; SPACE stop</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
