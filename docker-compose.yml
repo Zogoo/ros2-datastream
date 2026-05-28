@@ -1,5 +1,3 @@
-version: "3.9"
-
 x-ros-env: &ros-env
   ROS_DISTRO: lyrical
   ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
@@ -8,65 +6,59 @@ x-ros-env: &ros-env
   RCUTILS_COLORIZED_OUTPUT: "1"
   SAVE_DATASET: ${SAVE_DATASET:-false}
 
+x-ros-base: &ros-base
+  build: .
+  image: onsen-ros:latest
+  network_mode: host
+  restart: unless-stopped
+
 services:
   dummy_robot:
-    build: .
-    network_mode: host
+    <<: *ros-base
     environment:
       <<: *ros-env
     volumes:
       - ./dataset:/ros2_ws/dataset
       - ./output:/ros2_ws/output
     command: ros2 run onsen_dummy_robot dummy_stream_node
-    restart: unless-stopped
 
   ai_worker:
-    build: .
-    network_mode: host
+    <<: *ros-base
     environment:
       <<: *ros-env
     command: ros2 run onsen_ai_worker ai_worker_node
-    restart: unless-stopped
     depends_on:
       - dummy_robot
 
   foxglove_bridge:
-    build: .
-    network_mode: host
+    <<: *ros-base
     environment:
       <<: *ros-env
     command: >
       ros2 launch foxglove_bridge foxglove_bridge_launch.xml
       port:=8765
       address:=0.0.0.0
-    restart: unless-stopped
-    # port 8765 accessible on host directly via network_mode: host
 
   rosbridge:
-    build: .
-    network_mode: host
+    <<: *ros-base
     environment:
       <<: *ros-env
     command: >
       ros2 launch rosbridge_server rosbridge_websocket_launch.xml
       port:=9090
-    restart: unless-stopped
-    # ws://localhost:9090  — used by the frontend app
 
   frontend:
     build:
       context: ./frontend
+    image: onsen-frontend:latest
     network_mode: host
     restart: unless-stopped
     depends_on:
       - rosbridge
-    # http://localhost:8080  — 3D Android-camera UI
 
   rosbag_recorder:
-    build: .
-    network_mode: host
-    profiles:
-      - record
+    <<: *ros-base
+    profiles: [record]
     environment:
       <<: *ros-env
     volumes:
@@ -89,10 +81,8 @@ services:
       /task_plan
 
   rosbag_player:
-    build: .
-    network_mode: host
-    profiles:
-      - play
+    <<: *ros-base
+    profiles: [play]
     environment:
       <<: *ros-env
     volumes:

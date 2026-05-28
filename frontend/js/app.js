@@ -32,17 +32,33 @@ const C = {
 // ─── App state ────────────────────────────────────────────────────────────────
 const state = {
   pose:       { x: 0, y: 0, yaw: 0 },
+  visualPose: { x: 0, y: 0, yaw: 0 },
   joints:     {},
+  visualJoints: {},
+  jointTargets: {},
   scan:       null,
-  armState:   { state: 'HOME', cycle_id: 0, success_probability: 1.0 },
+  armState:   {
+    state: 'HOME',
+    cycle_id: 0,
+    target_object_id: '',
+    success_probability: 1.0,
+    manual_overrides: [],
+  },
   detections: [],
-  taskPlan:   { next_action: 'SEARCH', reason: '' },
+  detectionMeta: { timestamp: '', frame_id: 0 },
+  taskPlan:   {
+    task: '',
+    next_action: 'SEARCH',
+    target_object_id: null,
+    reason: '',
+  },
   connected:  false,
   viewMode:   'orbit',
   // Control
   cmdVx:      0.0,
   cmdWz:      0.0,
   manualMode: false,
+  lastOdomTs: 0,
 };
 
 // Keys currently held (movement)
@@ -62,6 +78,7 @@ let cameraMarker;
 // ─── ROS handles ──────────────────────────────────────────────────────────────
 let ros, pubCmdVel, pubArmAction;
 let cmdVelTimer = null;
+let lastAnimTs = performance.now();
 
 // ════════════════════════════════════════════════════════════════════════════════
 // Bootstrap
@@ -291,6 +308,17 @@ const ARM_JOINT_NAMES = [
   'wrist_pitch_joint','wrist_roll_joint','gripper_joint',
 ];
 
+const ARM_STATE_TARGETS = {
+  HOME:            [ 0.00, 0.20, 0.30,  0.00,  0.00, 0.00 ],
+  SEARCH:          [ 0.40, 0.10, 0.50, -0.20,  0.10, 0.00 ],
+  APPROACH_OBJECT: [ 0.60, 0.40, 0.70, -0.30,  0.05, 0.00 ],
+  LOWER_TO_TOWEL:  [ 0.60, 0.70, 1.00, -0.50,  0.00, 0.00 ],
+  GRIP:            [ 0.60, 0.72, 1.02, -0.52,  0.00, 0.60 ],
+  LIFT:            [ 0.60, 0.35, 0.60, -0.30,  0.15, 0.60 ],
+  DROP_TO_TRAY:    [-0.50, 0.25, 0.45, -0.20,  0.30, 0.00 ],
+  FAILED_GRIP:     [ 0.40, 0.50, 0.70, -0.40, -0.10, 0.00 ],
+};
+
 function buildArm(parent) {
   const linkMat    = new THREE.MeshLambertMaterial({ color: C.armLink });
   const jointMat   = new THREE.MeshLambertMaterial({ color: C.joint  });
@@ -368,6 +396,38 @@ function sub(name, type, throttle, cb) {
     .subscribe(cb);
 }
 
+function normalizeArmState(payload) {
+  return {
+    state: payload.state || 'HOME',
+    cycle_id: payload.cycle_id ?? 0,
+    target_object_id: payload.target_object_id || '',
+    success_probability: Number(payload.success_probability ?? 1.0),
+    manual_overrides: Array.isArray(payload.manual_overrides) ? payload.manual_overrides : [],
+  };
+}
+
+function normalizeTaskPlan(payload) {
+  return {
+    task: payload.task || '',
+    next_action: payload.next_action || '',
+    target_object_id: payload.target_object_id ?? null,
+    reason: payload.reason || '',
+  };
+}
+
+function normalizeDetection(obj) {
+  return {
+    id: obj.id || '',
+    class: obj.class || 'unknown',
+    confidence: Number(obj.confidence ?? 0),
+    bbox: Array.isArray(obj.bbox) ? obj.bbox : [0, 0, 0, 0],
+    robot_class: obj.robot_class || '',
+    pickable: Boolean(obj.pickable),
+    risk: obj.risk || '',
+    estimated_position: obj.estimated_position || { x: 0, y: 0, z: 0 },
+  };
+}
+
 // ── ROS subscriptions ─────────────────────────────────────────────────────────
 
 function onOdom(msg) {
@@ -375,11 +435,17 @@ function onOdom(msg) {
   state.pose.x   = p.position.x;
   state.pose.y   = p.position.y;
   state.pose.yaw = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z));
+  state.lastOdomTs = performance.now();
   updatePoseHUD();
 }
 
 function onJointStates(msg) {
-  msg.name.forEach((n, i) => state.joints[n] = msg.position[i]);
+  msg.name.forEach((n, i) => {
+    state.joints[n] = msg.position[i];
+    if (state.visualJoints[n] === undefined) {
+      state.visualJoints[n] = msg.position[i];
+    }
+  });
   applyJointsToRobot();
   syncSlidersFromJoints();
 }
@@ -390,11 +456,27 @@ function onCompressedImage(msg) {
   img.src = 'data:image/jpeg;base64,' + msg.data;
   img.classList.remove('no-signal');
 }
-function onArmState(msg)  { try { state.armState = JSON.parse(msg.data); updateArmHUD(); } catch(_){} }
-function onDetections(msg){ try { state.detections = (JSON.parse(msg.data).objects||[]); updateDetectHUD(); } catch(_){} }
+function onArmState(msg)  {
+  try {
+    state.armState = normalizeArmState(JSON.parse(msg.data));
+    applyArmPreset(state.armState.state);
+    updateArmHUD();
+  } catch(_) {}
+}
+function onDetections(msg){
+  try {
+    const payload = JSON.parse(msg.data);
+    state.detectionMeta = {
+      timestamp: payload.timestamp || '',
+      frame_id: payload.frame_id ?? 0,
+    };
+    state.detections = Array.isArray(payload.objects) ? payload.objects.map(normalizeDetection) : [];
+    updateDetectHUD();
+  } catch(_) {}
+}
 function onTaskPlan(msg)  {
   try {
-    state.taskPlan = JSON.parse(msg.data);
+    state.taskPlan = normalizeTaskPlan(JSON.parse(msg.data));
     document.getElementById('task-action').textContent = state.taskPlan.next_action || '';
     document.getElementById('task-reason').textContent = state.taskPlan.reason       || '';
   } catch(_) {}
@@ -555,8 +637,20 @@ function setupArmButtons() {
 
 function triggerArmState(stateName) {
   publishArmAction({ cmd: 'set_state', state: stateName });
+  applyArmPreset(stateName);
   document.querySelectorAll('.arm-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.state === stateName);
+  });
+}
+
+function applyArmPreset(stateName) {
+  const preset = ARM_STATE_TARGETS[stateName];
+  if (!preset) return;
+  ARM_JOINT_NAMES.forEach((name, i) => {
+    state.jointTargets[name] = preset[i];
+    if (state.visualJoints[name] === undefined) {
+      state.visualJoints[name] = preset[i];
+    }
   });
 }
 
@@ -610,6 +704,8 @@ function buildJointSliders() {
       _lastSliderInteract = Date.now();
       const v = parseFloat(slider.value);
       valDisplay.textContent = v.toFixed(2);
+      state.jointTargets[def.name] = v;
+      state.visualJoints[def.name] = v;
       publishArmAction({ cmd: 'set_joint', joint: def.name, value: v });
     });
 
@@ -698,27 +794,70 @@ function drawLidar(ranges) {
 
 function applyPoseToRobot() {
   if (!robotGroup) return;
-  robotGroup.position.x = state.pose.x;
-  robotGroup.position.z = -state.pose.y;
-  robotGroup.rotation.y = -state.pose.yaw;
+  robotGroup.position.x = state.visualPose.x;
+  robotGroup.position.z = -state.visualPose.y;
+  robotGroup.rotation.y = -state.visualPose.yaw;
 }
 
 function applyJointsToRobot() {
   if (!armJointGroups.length) return;
   armJointGroups.forEach(({ group, axis }, i) => {
-    const a = state.joints[ARM_JOINT_NAMES[i]] || 0;
+    const name = ARM_JOINT_NAMES[i];
+    const a = state.visualJoints[name] ?? state.joints[name] ?? 0;
     if (axis === 'y') group.rotation.y = a;
     else if (axis === 'z') group.rotation.z = a;
     else if (axis === 'x') group.rotation.x = a;
   });
-  const grip = state.joints['gripper_joint'] || 0;
+  const grip = state.visualJoints['gripper_joint'] ?? state.joints['gripper_joint'] ?? 0;
   if (gripperL) gripperL.position.x = -(0.022 + grip * 0.025);
   if (gripperR) gripperR.position.x =  (0.022 + grip * 0.025);
 
-  const la = state.joints['left_wheel_joint']  || 0;
-  const ra = state.joints['right_wheel_joint'] || 0;
+  const la = state.joints['left_wheel_joint']  ?? 0;
+  const ra = state.joints['right_wheel_joint'] ?? 0;
   leftWheelMeshes.forEach(w  => w.rotation.z = la);
   rightWheelMeshes.forEach(w => w.rotation.z = ra);
+}
+
+function driveInputActive() {
+  return keysHeld.size > 0 || anyDpadActive() || cmdVelTimer !== null;
+}
+
+function updateVisualPose(dt) {
+  const active = driveInputActive();
+  if (active) {
+    const { vx, wz } = resolveVelocity();
+    state.visualPose.yaw += wz * dt;
+    state.visualPose.x += vx * Math.cos(state.visualPose.yaw) * dt;
+    state.visualPose.y += vx * Math.sin(state.visualPose.yaw) * dt;
+    return;
+  }
+
+  const odomFresh = (performance.now() - state.lastOdomTs) < 1500;
+  if (!odomFresh) return;
+  const alpha = Math.min(1, dt * 8);
+  state.visualPose.x += (state.pose.x - state.visualPose.x) * alpha;
+  state.visualPose.y += (state.pose.y - state.visualPose.y) * alpha;
+  let dyaw = state.pose.yaw - state.visualPose.yaw;
+  while (dyaw > Math.PI) dyaw -= 2 * Math.PI;
+  while (dyaw < -Math.PI) dyaw += 2 * Math.PI;
+  state.visualPose.yaw += dyaw * alpha;
+}
+
+function updateVisualJoints(dt) {
+  const alpha = Math.min(1, dt * 12);
+  JOINT_DEFS.forEach(def => {
+    const name = def.name;
+    const current = state.visualJoints[name] ?? state.joints[name] ?? 0;
+    let target = state.jointTargets[name];
+    if (target === undefined) {
+      target = state.joints[name] ?? current;
+    }
+    const next = current + (target - current) * alpha;
+    state.visualJoints[name] = next;
+    if (state.jointTargets[name] !== undefined && Math.abs(target - next) < 0.005) {
+      delete state.jointTargets[name];
+    }
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -833,7 +972,7 @@ function setupUploadButton() {
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
-      state.detections = data.objects || [];
+      state.detections = Array.isArray(data.objects) ? data.objects.map(normalizeDetection) : [];
       updateDetectHUD();
       const n = state.detections.length;
       showEventTicker(`UPLOAD: ${n} OBJECT${n !== 1 ? 'S' : ''} DETECTED`);
@@ -865,8 +1004,12 @@ function setupShutterButton() {
 // Animation loop
 // ════════════════════════════════════════════════════════════════════════════════
 
-function animate() {
+function animate(now = performance.now()) {
   requestAnimationFrame(animate);
+  const dt = Math.min(0.05, Math.max(0.001, (now - lastAnimTs) / 1000));
+  lastAnimTs = now;
+  updateVisualPose(dt);
+  updateVisualJoints(dt);
   applyPoseToRobot();
   applyJointsToRobot();   // run every frame so arm is smooth at 60fps
   updateCameraForMode();

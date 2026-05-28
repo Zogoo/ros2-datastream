@@ -10,7 +10,6 @@ keeping the topic contract identical.
 from __future__ import annotations
 
 import json
-import math
 import random
 import threading
 from datetime import datetime, timezone
@@ -114,18 +113,22 @@ class AIWorkerNode(Node):
 
         class _Handler(BaseHTTPRequestHandler):
             def do_OPTIONS(self):
-                self._cors(); self.end_headers()
+                self._cors()
+                self.end_headers()
 
             def do_POST(self):
                 if self.path != '/upload':
-                    self.send_error(404); return
+                    self.send_error(404)
+                    return
                 length = int(self.headers.get('Content-Length', 0))
                 if length == 0:
-                    self.send_error(400, 'Empty body'); return
+                    self.send_error(400, 'Empty body')
+                    return
                 raw = self.rfile.read(length)
                 img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
                 if img is None:
-                    self.send_error(400, 'Cannot decode image'); return
+                    self.send_error(400, 'Cannot decode image')
+                    return
                 detections = node._detect(img)
                 node._publish_detections(detections)
                 node._publish_task_plan(detections)
@@ -142,7 +145,8 @@ class AIWorkerNode(Node):
                 self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
                 self.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
-            def log_message(self, *_): pass  # silence access log noise
+            def log_message(self, *_):
+                return
 
         server = HTTPServer(('', port), _Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()

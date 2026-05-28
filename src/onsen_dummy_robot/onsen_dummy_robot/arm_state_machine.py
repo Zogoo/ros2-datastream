@@ -9,7 +9,6 @@ External control API (called by dummy_stream_node from /arm/action messages):
 """
 from __future__ import annotations
 
-import math
 import random
 import time
 from enum import Enum, auto
