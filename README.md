@@ -1,162 +1,187 @@
-# onsen_robot_data_stream
+# Onsen Robot — ROS2 Data Stream
 
-A ROS2 Jazzy Docker Compose demo environment that publishes realistic synthetic
-topics mimicking a small tank-drive cleaning robot operating in a Japanese
-onsen / sauna / bathroom-like indoor environment.
+A ROS2 Lyrical Docker Compose environment that streams realistic synthetic sensor data
+from a small tank-drive cleaning robot in a Japanese onsen/bathroom setting.
 
-**This is not a physics simulator.**
-There is no Gazebo, Isaac Sim, or robot model involved.
-All data is generated in Python using NumPy and OpenCV.
-The purpose is data-pipeline development, model integration testing,
-LLM planner research, and ROS2 topic-contract validation.
+**Not a physics simulator.** No Gazebo, no robot model.  
+All data is generated in Python (NumPy + OpenCV).  
+Designed for: data pipeline development, AI model integration, LLM planner research.
 
 ---
 
-## Prerequisites
-
-- Docker ≥ 24
-- Docker Compose ≥ 2.20
-- ~3 GB disk for the Docker image
-
----
-
-## Build
+## Quick start
 
 ```bash
-cd onsen_robot_data_stream
-docker compose build
+docker compose up
 ```
+
+First run builds two images (`onsen-ros:latest`, `onsen-frontend:latest`) then starts all services.
+Subsequent runs reuse the cache and start in seconds.
+Use `docker compose up --build` after changing source files or the Dockerfile.
 
 ---
 
-## Run
+## Services and ports
 
-### Core services (robot + AI + Foxglove bridge)
-
-```bash
-docker compose up dummy_robot ai_worker foxglove_bridge
-```
-
-### View in Foxglove Studio
-
-1. Open [Foxglove Studio](https://foxglove.dev/studio) in your browser
-2. Click **Open connection** → **Foxglove WebSocket**
-3. Enter: `ws://localhost:8765`
-4. Add panels: Image (`/camera/front/image_raw`), 3D (`/tf`, `/scan`), Plot (`/odom`), Raw Messages (`/detected_objects`, `/task_plan`)
-
----
-
-## Record a ROS bag
-
-```bash
-docker compose --profile record up rosbag_recorder
-```
-
-Bag is saved to `./bags/onsen_dummy_run/` in MCAP format.
-
-Recorded topics:
-- `/camera/front/image_raw`
-- `/camera/front/camera_info`
-- `/scan`
-- `/odom`
-- `/tf`
-- `/tf_static`
-- `/joint_states`
-- `/arm/state`
-- `/robot/events`
-- `/detected_objects`
-- `/task_plan`
-
----
-
-## Replay a bag
-
-```bash
-docker compose --profile play up rosbag_player
-```
-
----
-
-## Inspect topics
-
-```bash
-# List all active topics
-docker compose exec dummy_robot ros2 topic list
-
-# Echo detections
-docker compose exec dummy_robot ros2 topic echo /detected_objects
-
-# Echo task plan
-docker compose exec dummy_robot ros2 topic echo /task_plan
-
-# Echo robot events
-docker compose exec dummy_robot ros2 topic echo /robot/events
-
-# Echo arm state
-docker compose exec dummy_robot ros2 topic echo /arm/state
-
-# Check topic bandwidth
-docker compose exec dummy_robot ros2 topic bw /camera/front/image_raw
-
-# Inspect a bag
-docker compose exec rosbag_recorder ros2 bag info /bags/onsen_dummy_run
-```
-
----
-
-## Save dataset frames
-
-```bash
-SAVE_DATASET=true docker compose up dummy_robot ai_worker foxglove_bridge
-```
-
-Frames are saved to:
-- `dataset/images/frame_NNNNNN.jpg`
-- `dataset/annotations/frame_NNNNNN.json` (ground-truth JSON per frame)
-
----
-
-## Environment variables
-
-| Variable | Default | Description |
+| Service | What it does | Address |
 |---|---|---|
-| `ROS_DOMAIN_ID` | `42` | ROS2 discovery domain |
-| `SAVE_DATASET` | `false` | Save generated frames to `dataset/` |
+| `dummy_robot` | Publishes all synthetic sensor topics + accepts control input | — |
+| `ai_worker` | Subscribes to camera, detects objects, publishes AI topics + HTTP upload | `localhost:5000` |
+| `rosbridge` | WebSocket bridge for the frontend | `ws://localhost:9090` |
+| `foxglove_bridge` | Foxglove Studio WebSocket | `ws://localhost:8765` |
+| `frontend` | 3D Android-camera-style control UI | `http://localhost:8080` |
+
+---
+
+## Web UI — primary interface
+
+Open **http://localhost:8080** after `docker compose up`.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ ● CONNECTED   AUTO   ONSEN ROBOT   12:34:56   ◉ LIVE   │  ← status bar
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│   ARM STATE        [3D viewfinder]       DETECTIONS     │
+│   HOME                                  2 objects       │
+│   CYCLE: 0    [tank robot + 6DOF arm]   towel 86%       │
+│   PROB: 1.00         orbits/follows      slipper 71%    │
+│                                                         │
+│            [▲]                                          │
+│         [◄][■][►]    lidar ○    cam □                   │
+│            [▼]                                          │
+├─────────────────────────────────────────────────────────┤
+│  ORBIT  FOLLOW  FPS   ◉   ⬆ UPLOAD   SEARCH / reason   │
+├─────────────────────────────────────────────────────────┤
+│  ARM:  HOME  SRCH  APPR  LOWR  GRIP  LIFT  DROP  JOINTS▾│
+└─────────────────────────────────────────────────────────┘
+```
+
+### Robot control
+
+| Input | Action |
+|---|---|
+| `W / ↑` | Forward |
+| `S / ↓` | Backward |
+| `A / ←` | Rotate left |
+| `D / →` | Rotate right |
+| `Space` | Stop |
+| `1–7` | Arm states: HOME → SEARCH → APPROACH → LOWER → GRIP → LIFT → DROP |
+| D-pad buttons | Same as keyboard, touch-friendly |
+
+After 3 seconds without input the robot resumes its autonomous patrol loop.
+
+### View modes
+
+- **ORBIT** — free camera, drag to rotate
+- **FOLLOW** — camera trails behind the robot
+- **FPS** — first-person from the robot's camera mount
+
+### Upload images to AI worker
+
+Click **⬆ UPLOAD**, pick any JPEG/PNG.  
+The AI worker runs the same HSV object-detection pipeline on it and publishes results
+to `/detected_objects` and `/task_plan` — identical to what live camera frames produce.  
+The Detections HUD updates immediately.
+
+---
+
+## Verify ROS topics are flowing
+
+Run these in a second terminal while the stack is up.
+
+> **Note:** `docker compose exec` bypasses the container entrypoint, so ROS2 is not on PATH by default.
+> Prefix every `ros2` command with `/entrypoint.sh` to source the environment first.
+
+```bash
+# All active topics
+docker compose exec dummy_robot /entrypoint.sh ros2 topic list
+
+# Robot position + orientation (20 Hz)
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /odom --once
+
+# Arm + wheel joint angles (10 Hz)
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /joint_states --once
+
+# LiDAR scan — 360 ranges (8 Hz)
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /scan --once
+
+# AI detections
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /detected_objects
+
+# Task planner output
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /task_plan
+
+# Robot events (occasional)
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /robot/events
+
+# Control mode (auto / manual)
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /robot/control_mode
+
+# Topic publish rates
+docker compose exec dummy_robot /entrypoint.sh ros2 topic hz /odom
+docker compose exec dummy_robot /entrypoint.sh ros2 topic hz /joint_states
+docker compose exec dummy_robot /entrypoint.sh ros2 topic hz /camera/front/image_raw
+
+# Camera bandwidth
+docker compose exec dummy_robot /entrypoint.sh ros2 topic bw /camera/front/image_raw
+```
+
+### Expected rates when healthy
+
+| Topic | Expected Hz |
+|---|---|
+| `/odom` | 20 |
+| `/joint_states` | 10 |
+| `/camera/front/image_raw` | ~7 |
+| `/scan` | 8 |
+| `/detected_objects` | ~7 (tied to camera) |
+
+---
+
+## Foxglove Studio (alternative data view)
+
+1. Open [Foxglove Studio](https://foxglove.dev/studio)
+2. **Open connection → Foxglove WebSocket → `ws://localhost:8765`**
+3. Useful panels:
+   - **Image** → `/camera/front/image_raw`
+   - **3D** → `/tf`, `/scan`, `/joint_states`
+   - **Plot** → `/odom` (position x/y over time)
+   - **Raw Messages** → `/detected_objects`, `/task_plan`
 
 ---
 
 ## Topic contract
 
-### Camera
-| Topic | Type |
-|---|---|
-| `/camera/front/image_raw` | `sensor_msgs/msg/Image` (rgb8, 640×480) |
-| `/camera/front/camera_info` | `sensor_msgs/msg/CameraInfo` |
+### Published by `dummy_robot`
 
-### LiDAR
-| Topic | Type |
-|---|---|
-| `/scan` | `sensor_msgs/msg/LaserScan` (360 rays, ±π) |
+| Topic | Type | Rate |
+|---|---|---|
+| `/camera/front/image_raw` | `sensor_msgs/Image` (rgb8, 640×480) | 7 Hz |
+| `/camera/front/image_raw/compressed` | `sensor_msgs/CompressedImage` (jpeg) | 7 Hz |
+| `/camera/front/camera_info` | `sensor_msgs/CameraInfo` | 7 Hz |
+| `/scan` | `sensor_msgs/LaserScan` (360 rays, ±π, max 8 m) | 8 Hz |
+| `/odom` | `nav_msgs/Odometry` | 20 Hz |
+| `/tf` | `base_link` in `odom` frame | 20 Hz |
+| `/tf_static` | `base_link→laser_link`, `→camera_front_link`, `→arm_base_link` | once |
+| `/joint_states` | `sensor_msgs/JointState` (6 arm + 2 wheel joints) | 10 Hz |
+| `/arm/state` | `std_msgs/String` (JSON) | 10 Hz |
+| `/robot/events` | `std_msgs/String` (JSON) | ~0.1 Hz |
+| `/robot/control_mode` | `std_msgs/String` (JSON) | 20 Hz |
 
-### Robot movement
-| Topic | Type |
-|---|---|
-| `/odom` | `nav_msgs/msg/Odometry` |
-| `/tf` | via `tf2_ros.TransformBroadcaster` |
-| `/tf_static` | `base_link→laser_link`, `base_link→camera_front_link`, `base_link→arm_base_link` |
+### Published by `ai_worker`
 
-### Arm
-| Topic | Type |
-|---|---|
-| `/joint_states` | `sensor_msgs/msg/JointState` |
-| `/arm/state` | `std_msgs/msg/String` (JSON) |
+| Topic | Type | Rate |
+|---|---|---|
+| `/detected_objects` | `std_msgs/String` (JSON) | ~7 Hz |
+| `/task_plan` | `std_msgs/String` (JSON) | ~7 Hz |
 
-### Events & AI output
-| Topic | Type |
-|---|---|
-| `/robot/events` | `std_msgs/msg/String` (JSON) |
-| `/detected_objects` | `std_msgs/msg/String` (JSON) |
-| `/task_plan` | `std_msgs/msg/String` (JSON) |
+### Subscribed by `dummy_robot` (control inputs)
+
+| Topic | Type | Publisher |
+|---|---|---|
+| `/cmd_vel` | `geometry_msgs/Twist` | web UI / nav stack |
+| `/arm/action` | `std_msgs/String` (JSON) | web UI |
 
 ---
 
@@ -168,8 +193,14 @@ Frames are saved to:
   "state": "LOWER_TO_TOWEL",
   "cycle_id": 12,
   "target_object_id": "obj_005",
-  "success_probability": 0.72
+  "success_probability": 0.72,
+  "manual_overrides": []
 }
+```
+
+### `/robot/control_mode`
+```json
+{ "mode": "manual", "vx": 0.35, "wz": 0.0 }
 ```
 
 ### `/robot/events`
@@ -177,7 +208,7 @@ Frames are saved to:
 {
   "event": "PERSON_TOO_CLOSE",
   "timestamp": "2025-01-01T12:00:00+00:00",
-  "robot_pose": {"x": 0.8, "y": -1.1, "yaw": 1.57},
+  "robot_pose": { "x": 0.8, "y": -1.1, "yaw": 1.57 },
   "steam_level": "medium",
   "wet_floor": true
 }
@@ -197,7 +228,7 @@ Frames are saved to:
       "robot_class": "pickable_soft_object",
       "pickable": true,
       "risk": "low",
-      "estimated_position": {"x": 1.1, "y": -0.2, "z": 0.0}
+      "estimated_position": { "x": 1.1, "y": -0.2, "z": 0.0 }
     }
   ]
 }
@@ -213,71 +244,111 @@ Frames are saved to:
 }
 ```
 
+### `/arm/action` (control input)
+```json
+{ "cmd": "set_state", "state": "GRIP" }
+{ "cmd": "set_joint", "joint": "shoulder_pan_joint", "value": 0.5 }
+{ "cmd": "clear" }
+```
+
 ---
 
-## Object classes
+## Record / replay
 
-| Class | Robot class | Risk |
+```bash
+# Record to ./bags/ (MCAP format)
+docker compose --profile record up
+
+# Replay a recorded bag on loop
+docker compose --profile play up
+```
+
+Inspect a bag:
+```bash
+docker compose exec dummy_robot /entrypoint.sh ros2 bag info /bags/onsen_dummy_run
+```
+
+---
+
+## Save dataset frames
+
+```bash
+SAVE_DATASET=true docker compose up
+```
+
+Saves to:
+- `dataset/images/frame_NNNNNN.jpg`
+- `dataset/annotations/frame_NNNNNN.json` — ground-truth JSON per frame (COCO-compatible)
+
+---
+
+## Environment variables
+
+| Variable | Default | Description |
 |---|---|---|
-| `towel` | `pickable_soft_object` | low |
-| `clothes` | `pickable_soft_object` | low |
-| `slipper` | `pickable_soft_object` | low |
-| `brush` | `pickable_soft_object` | low |
-| `plastic_trash` | `pickable_soft_object` | low |
-| `bath_mat` | `pickable_soft_object` | low |
-| `bottle` | `non_pickable_hard_object` | avoid |
-| `bucket` | `non_pickable_hard_object` | avoid |
-| `can` | `non_pickable_hard_object` | avoid |
-| `bench` | `static_environment` | avoid |
-| `floor` | `static_environment` | low |
-| `wall` | `static_environment` | avoid |
-| `person_body_part` | `safety_stop` | **stop** |
-| `unknown_obstacle` | `unknown_obstacle` | **stop** |
+| `ROS_DOMAIN_ID` | `42` | ROS2 DDS discovery domain |
+| `SAVE_DATASET` | `false` | Write frames + annotations to `dataset/` |
 
 ---
 
 ## Arm states
 
-`HOME` → `SEARCH` → `APPROACH_OBJECT` → `LOWER_TO_TOWEL` → `GRIP` → `LIFT` → `DROP_TO_TRAY` → (repeat)
-
-With ~20% chance of `FAILED_GRIP` injected at `GRIP`.
+```
+HOME → SEARCH → APPROACH_OBJECT → LOWER_TO_TOWEL → GRIP → LIFT → DROP_TO_TRAY → (repeat)
+                                                      ↓
+                                               FAILED_GRIP (~20%)
+```
 
 ---
 
-## Extending this project
+## Extending the stack
 
-- **Replace AI worker**: swap `ai_worker_node.py` with a real ONNX / TensorRT model.
-  Keep the `/detected_objects` and `/task_plan` JSON schemas unchanged.
-- **Add LLM planner**: subscribe to `/detected_objects` + `/robot/events` and publish to `/task_plan`.
-- **Add nav stack**: subscribe to `/scan` + `/odom` and publish `/cmd_vel` — the dummy robot
-  will incorporate it automatically if `cmd_vel` subscriber is wired.
-- **COCO dataset export**: set `SAVE_DATASET=true` and collect `dataset/annotations/*.json`.
+**Replace the AI worker with a real model**  
+Keep `/detected_objects` and `/task_plan` JSON schemas unchanged.
+Swap `ai_worker_node.py` with ONNX / TensorRT inference — the frontend and rosbag pipeline see no difference.
+
+**Add an LLM planner**  
+Subscribe to `/detected_objects` + `/robot/events`, publish to `/task_plan`.
+
+**Add a nav stack**  
+Subscribe to `/scan` + `/odom`, publish `/cmd_vel`.
+The dummy robot incorporates it automatically; the web UI shows MANUAL mode during active commands.
+
+**COCO dataset export**  
+Set `SAVE_DATASET=true`, drive the robot around, collect `dataset/annotations/*.json`.
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Docker network (host mode — all on ROS_DOMAIN_ID=42)    │
-│                                                           │
-│  dummy_robot ──────────────────────────────────────────► │
-│    SceneGenerator (OpenCV) → /camera/front/image_raw      │
-│    LidarGenerator (NumPy)  → /scan                        │
-│    OdomPublisher           → /odom  /tf                   │
-│    ArmStateMachine         → /joint_states  /arm/state    │
-│    EventPublisher          → /robot/events                │
-│                                                           │
-│  ai_worker ◄── /camera/front/image_raw                   │
-│    OpenCV HSV detector     → /detected_objects            │
-│    Task planner            → /task_plan                   │
-│                                                           │
-│  foxglove_bridge ◄── all topics → ws://localhost:8765     │
-│                                                           │
-│  rosbag_recorder [profile:record]                         │
-│    → bags/onsen_dummy_run/ (MCAP)                         │
-│                                                           │
-│  rosbag_player [profile:play]                             │
-│    bags/onsen_dummy_run/ → all topics                     │
-└──────────────────────────────────────────────────────────┘
+docker compose up
+│
+├── dummy_robot ─────────────────────────────────────────────────────►
+│     SceneGenerator (OpenCV)  →  /camera/front/image_raw
+│                                 /camera/front/image_raw/compressed
+│     LidarGenerator (NumPy)   →  /scan
+│     OdomPublisher            →  /odom  /tf  /tf_static
+│     ArmStateMachine          →  /joint_states  /arm/state
+│     EventPublisher           →  /robot/events  /robot/control_mode
+│     ◄── /cmd_vel  /arm/action  (from rosbridge or nav stack)
+│
+├── ai_worker ◄── /camera/front/image_raw ──────────────────────────►
+│     OpenCV HSV detector       →  /detected_objects
+│     Task planner              →  /task_plan
+│     HTTP POST :5000/upload    →  /detected_objects  /task_plan
+│
+├── rosbridge  ws://localhost:9090  (all topics ↔ browser)
+│
+├── foxglove_bridge  ws://localhost:8765  (all topics → Foxglove Studio)
+│
+├── frontend  http://localhost:8080
+│     Three.js 3D viewfinder  ←→  rosbridge WebSocket
+│     D-pad / WASD / joint sliders → /cmd_vel  /arm/action
+│     Camera PiP ← /camera/front/image_raw/compressed
+│     LiDAR minimap ← /scan
+│     nginx /api/ proxy → ai_worker :5000
+│
+├── rosbag_recorder  [profile: record]  →  ./bags/  (MCAP)
+└── rosbag_player    [profile: play]    ←  ./bags/
 ```
