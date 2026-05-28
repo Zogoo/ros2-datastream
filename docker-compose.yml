@@ -2,6 +2,7 @@ x-ros-env: &ros-env
   ROS_DISTRO: lyrical
   ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
   RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+  FASTDDS_BUILTIN_TRANSPORTS: UDPv4
   RCUTILS_LOGGING_BUFFERED_STREAM: "1"
   RCUTILS_COLORIZED_OUTPUT: "1"
   SAVE_DATASET: ${SAVE_DATASET:-false}
@@ -67,6 +68,7 @@ services:
       ros2 bag record
       --output /bags/onsen_dummy_run
       --storage mcap
+      --topics
       /camera/front/image_raw
       /camera/front/image_raw/compressed
       /camera/front/camera_info

@@ -10,8 +10,10 @@ keeping the topic contract identical.
 from __future__ import annotations
 
 import json
+import os
 import random
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
@@ -23,6 +25,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
 SENSOR_QOS = QoSProfile(
@@ -100,11 +103,17 @@ class AIWorkerNode(Node):
             Image, "/camera/front/image_raw",
             self._image_callback, SENSOR_QOS,
         )
+        self._sub_compressed = self.create_subscription(
+            CompressedImage, "/camera/front/image_raw/compressed",
+            self._compressed_image_callback, SENSOR_QOS,
+        )
         self._pub_detections = self.create_publisher(String, "/detected_objects", 10)
         self._pub_task_plan  = self.create_publisher(String, "/task_plan", 10)
 
         self._frame_count = 0
         self._rng = random.Random()
+        self._min_process_interval = float(os.environ.get("AI_PROCESS_MIN_INTERVAL", "0.08"))
+        self._last_processed_at = 0.0
         self._start_upload_server(port=5000)
         self.get_logger().info("AIWorkerNode started — waiting for images")
 
@@ -153,11 +162,24 @@ class AIWorkerNode(Node):
         self.get_logger().info(f"Upload HTTP server listening on :{port}/upload")
 
     def _image_callback(self, msg: Image) -> None:
-        self._frame_count += 1
         img = self._ros_image_to_bgr(msg)
         if img is None:
             return
+        self._process_frame(img)
 
+    def _compressed_image_callback(self, msg: CompressedImage) -> None:
+        arr = np.frombuffer(msg.data, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return
+        self._process_frame(img)
+
+    def _process_frame(self, img: np.ndarray) -> None:
+        now = time.monotonic()
+        if now - self._last_processed_at < self._min_process_interval:
+            return
+        self._last_processed_at = now
+        self._frame_count += 1
         detections = self._detect(img)
         self._publish_detections(detections)
         self._publish_task_plan(detections)
