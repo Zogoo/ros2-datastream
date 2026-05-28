@@ -35,7 +35,6 @@ const state = {
   visualPose: { x: 0, y: 0, yaw: 0 },
   joints:     {},
   visualJoints: {},
-  jointTargets: {},
   scan:       null,
   armState:   {
     state: 'HOME',
@@ -308,17 +307,6 @@ const ARM_JOINT_NAMES = [
   'wrist_pitch_joint','wrist_roll_joint','gripper_joint',
 ];
 
-const ARM_STATE_TARGETS = {
-  HOME:            [ 0.00, 0.20, 0.30,  0.00,  0.00, 0.00 ],
-  SEARCH:          [ 0.40, 0.10, 0.50, -0.20,  0.10, 0.00 ],
-  APPROACH_OBJECT: [ 0.60, 0.40, 0.70, -0.30,  0.05, 0.00 ],
-  LOWER_TO_TOWEL:  [ 0.60, 0.70, 1.00, -0.50,  0.00, 0.00 ],
-  GRIP:            [ 0.60, 0.72, 1.02, -0.52,  0.00, 0.60 ],
-  LIFT:            [ 0.60, 0.35, 0.60, -0.30,  0.15, 0.60 ],
-  DROP_TO_TRAY:    [-0.50, 0.25, 0.45, -0.20,  0.30, 0.00 ],
-  FAILED_GRIP:     [ 0.40, 0.50, 0.70, -0.40, -0.10, 0.00 ],
-};
-
 function buildArm(parent) {
   const linkMat    = new THREE.MeshLambertMaterial({ color: C.armLink });
   const jointMat   = new THREE.MeshLambertMaterial({ color: C.joint  });
@@ -435,6 +423,11 @@ function onOdom(msg) {
   state.pose.x   = p.position.x;
   state.pose.y   = p.position.y;
   state.pose.yaw = Math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z));
+  if (state.lastOdomTs === 0) {
+    state.visualPose.x = state.pose.x;
+    state.visualPose.y = state.pose.y;
+    state.visualPose.yaw = state.pose.yaw;
+  }
   state.lastOdomTs = performance.now();
   updatePoseHUD();
 }
@@ -442,9 +435,7 @@ function onOdom(msg) {
 function onJointStates(msg) {
   msg.name.forEach((n, i) => {
     state.joints[n] = msg.position[i];
-    if (state.visualJoints[n] === undefined) {
-      state.visualJoints[n] = msg.position[i];
-    }
+    if (state.visualJoints[n] === undefined) state.visualJoints[n] = msg.position[i];
   });
   applyJointsToRobot();
   syncSlidersFromJoints();
@@ -459,7 +450,6 @@ function onCompressedImage(msg) {
 function onArmState(msg)  {
   try {
     state.armState = normalizeArmState(JSON.parse(msg.data));
-    applyArmPreset(state.armState.state);
     updateArmHUD();
   } catch(_) {}
 }
@@ -637,20 +627,8 @@ function setupArmButtons() {
 
 function triggerArmState(stateName) {
   publishArmAction({ cmd: 'set_state', state: stateName });
-  applyArmPreset(stateName);
   document.querySelectorAll('.arm-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.state === stateName);
-  });
-}
-
-function applyArmPreset(stateName) {
-  const preset = ARM_STATE_TARGETS[stateName];
-  if (!preset) return;
-  ARM_JOINT_NAMES.forEach((name, i) => {
-    state.jointTargets[name] = preset[i];
-    if (state.visualJoints[name] === undefined) {
-      state.visualJoints[name] = preset[i];
-    }
   });
 }
 
@@ -704,8 +682,6 @@ function buildJointSliders() {
       _lastSliderInteract = Date.now();
       const v = parseFloat(slider.value);
       valDisplay.textContent = v.toFixed(2);
-      state.jointTargets[def.name] = v;
-      state.visualJoints[def.name] = v;
       publishArmAction({ cmd: 'set_joint', joint: def.name, value: v });
     });
 
@@ -818,23 +794,10 @@ function applyJointsToRobot() {
   rightWheelMeshes.forEach(w => w.rotation.z = ra);
 }
 
-function driveInputActive() {
-  return keysHeld.size > 0 || anyDpadActive() || cmdVelTimer !== null;
-}
-
 function updateVisualPose(dt) {
-  const active = driveInputActive();
-  if (active) {
-    const { vx, wz } = resolveVelocity();
-    state.visualPose.yaw += wz * dt;
-    state.visualPose.x += vx * Math.cos(state.visualPose.yaw) * dt;
-    state.visualPose.y += vx * Math.sin(state.visualPose.yaw) * dt;
-    return;
-  }
-
   const odomFresh = (performance.now() - state.lastOdomTs) < 1500;
   if (!odomFresh) return;
-  const alpha = Math.min(1, dt * 8);
+  const alpha = Math.min(1, dt * 20);
   state.visualPose.x += (state.pose.x - state.visualPose.x) * alpha;
   state.visualPose.y += (state.pose.y - state.visualPose.y) * alpha;
   let dyaw = state.pose.yaw - state.visualPose.yaw;
@@ -844,19 +807,14 @@ function updateVisualPose(dt) {
 }
 
 function updateVisualJoints(dt) {
-  const alpha = Math.min(1, dt * 12);
+  const alpha = Math.min(1, dt * 20);
   JOINT_DEFS.forEach(def => {
     const name = def.name;
-    const current = state.visualJoints[name] ?? state.joints[name] ?? 0;
-    let target = state.jointTargets[name];
-    if (target === undefined) {
-      target = state.joints[name] ?? current;
-    }
+    const target = state.joints[name];
+    if (target === undefined) return;
+    const current = state.visualJoints[name] ?? target;
     const next = current + (target - current) * alpha;
     state.visualJoints[name] = next;
-    if (state.jointTargets[name] !== undefined && Math.abs(target - next) < 0.005) {
-      delete state.jointTargets[name];
-    }
   });
 }
 
