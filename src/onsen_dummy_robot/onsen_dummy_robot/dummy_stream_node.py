@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 import cv2
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
@@ -92,17 +93,20 @@ class DummyStreamNode(Node):
 
         self._last_update  = time.monotonic()
         self._last_gt: dict[str, Any] = {}
+        self._realism_profile = os.environ.get("REALISM_PROFILE", "low").lower()
+        self._camera_drop_prob = {"low": 0.01, "medium": 0.05, "high": 0.10}.get(self._realism_profile, 0.01)
+        self._odom_noise_std = {"low": 0.002, "medium": 0.01, "high": 0.02}.get(self._realism_profile, 0.002)
+        self._scan_noise_std = {"low": 0.005, "medium": 0.02, "high": 0.05}.get(self._realism_profile, 0.005)
 
         # ── Publishers ──────────────────────────────────────────────────────
-        self._pub_image      = self.create_publisher(Image,           "/camera/front/image_raw",            SENSOR_QOS)
-        self._pub_compressed = self.create_publisher(CompressedImage, "/camera/front/image_raw/compressed", SENSOR_QOS)
-        self._pub_caminfo    = self.create_publisher(CameraInfo,      "/camera/front/camera_info",          SENSOR_QOS)
+        self._pub_image      = self.create_publisher(Image,           "/camera/source/dummy/image_raw",            SENSOR_QOS)
+        self._pub_compressed = self.create_publisher(CompressedImage, "/camera/source/dummy/image_raw/compressed", SENSOR_QOS)
+        self._pub_caminfo    = self.create_publisher(CameraInfo,      "/camera/source/dummy/camera_info",          SENSOR_QOS)
         self._pub_scan       = self.create_publisher(LaserScan,       "/scan",                              SENSOR_QOS)
         self._pub_odom       = self.create_publisher(Odometry,        "/odom",                              10)
         self._pub_joints     = self.create_publisher(JointState,      "/joint_states",                      10)
         self._pub_arm_state  = self.create_publisher(String,          "/arm/state",                         10)
         self._pub_events     = self.create_publisher(String,          "/robot/events",                      10)
-        self._pub_ctrl_mode  = self.create_publisher(String,          "/robot/control_mode",                10)
 
         # ── Subscribers (control inputs) ────────────────────────────────────
         self.create_subscription(Twist,  "/cmd_vel",    self._on_cmd_vel,    10)
@@ -177,8 +181,13 @@ class DummyStreamNode(Node):
     # ── Camera ───────────────────────────────────────────────────────────────
 
     def _publish_camera(self) -> None:
+        if self._rng.random() < self._camera_drop_prob:
+            return
         img_rgb, gt = self._scene_gen.generate()
         self._last_gt = gt
+        if self._realism_profile in ("medium", "high"):
+            k = 3 if self._realism_profile == "medium" else 5
+            img_rgb = cv2.GaussianBlur(img_rgb, (k, k), 0)
         stamp = self._ros_time()
 
         img_msg             = Image()
@@ -191,10 +200,15 @@ class DummyStreamNode(Node):
         img_msg.data     = img_rgb.tobytes()
         self._pub_image.publish(img_msg)
 
+        jpeg_quality = 85
+        if self._realism_profile == "medium":
+            jpeg_quality = self._rng.randint(65, 85)
+        elif self._realism_profile == "high":
+            jpeg_quality = self._rng.randint(45, 80)
         _, jpeg_buf = cv2.imencode(
             ".jpg",
             cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR),
-            [cv2.IMWRITE_JPEG_QUALITY, 80],
+            [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality],
         )
         comp_msg        = CompressedImage()
         comp_msg.header = img_msg.header
@@ -220,6 +234,9 @@ class DummyStreamNode(Node):
 
     def _publish_lidar(self) -> None:
         ranges = self._lidar_gen.generate(self._robot_x, self._robot_y, self._robot_yaw)
+        if self._scan_noise_std > 0:
+            ranges = ranges + np.random.normal(0.0, self._scan_noise_std, size=ranges.shape)
+            ranges = np.clip(ranges, 0.05, 8.0)
         stamp  = self._ros_time()
         msg = LaserScan()
         msg.header.stamp    = stamp
@@ -240,9 +257,9 @@ class DummyStreamNode(Node):
         dt  = max(0.0, min(now - self._last_update, 0.1))   # clamp to 100 ms
         self._last_update = now
 
-        manual = (now - self._last_cmd_vel_time) < MANUAL_TIMEOUT
+        manual_active = (now - self._last_cmd_vel_time) < MANUAL_TIMEOUT
 
-        if manual:
+        if manual_active:
             # Dead-reckoning from commanded velocity
             vx_fwd = self._cmd_vx
             wz     = self._cmd_wz
@@ -277,10 +294,13 @@ class DummyStreamNode(Node):
         odom.child_frame_id        = "base_link"
         odom.pose.pose.position.x  = self._robot_x
         odom.pose.pose.position.y  = self._robot_y
+        if self._odom_noise_std > 0:
+            odom.pose.pose.position.x += self._rng.normalvariate(0.0, self._odom_noise_std)
+            odom.pose.pose.position.y += self._rng.normalvariate(0.0, self._odom_noise_std)
         odom.pose.pose.orientation = q
-        odom.twist.twist.linear.x  = v_fwd * math.cos(self._robot_yaw) if manual else \
+        odom.twist.twist.linear.x  = v_fwd * math.cos(self._robot_yaw) if manual_active else \
                                      -self._loop_radius * self._loop_speed * math.sin(self._loop_angle)
-        odom.twist.twist.linear.y  = v_fwd * math.sin(self._robot_yaw) if manual else \
+        odom.twist.twist.linear.y  = v_fwd * math.sin(self._robot_yaw) if manual_active else \
                                       self._loop_radius * self._loop_speed * math.cos(self._loop_angle)
         odom.twist.twist.angular.z = wz
         self._pub_odom.publish(odom)
@@ -293,15 +313,6 @@ class DummyStreamNode(Node):
         tf.transform.translation.y = self._robot_y
         tf.transform.rotation       = q
         self._tf_broadcaster.sendTransform(tf)
-
-        # Publish control mode so UI can display it
-        mode_msg = String()
-        mode_msg.data = json.dumps({
-            "mode":  "manual" if manual else "auto",
-            "vx":    round(v_fwd if manual else 0.0, 3),
-            "wz":    round(wz, 3),
-        })
-        self._pub_ctrl_mode.publish(mode_msg)
 
     # ── Arm + wheel joints ───────────────────────────────────────────────────
 

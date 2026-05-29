@@ -99,14 +99,19 @@ class AIWorkerNode(Node):
     def __init__(self) -> None:
         super().__init__("ai_worker_node")
 
-        self._sub_image = self.create_subscription(
-            Image, "/camera/front/image_raw",
-            self._image_callback, SENSOR_QOS,
-        )
-        self._sub_compressed = self.create_subscription(
-            CompressedImage, "/camera/front/image_raw/compressed",
-            self._compressed_image_callback, SENSOR_QOS,
-        )
+        camera_input = os.environ.get("AI_CAMERA_INPUT", "raw").lower()
+        self._sub_image = None
+        self._sub_compressed = None
+        if camera_input == "compressed":
+            self._sub_compressed = self.create_subscription(
+                CompressedImage, "/camera/front/image_raw/compressed",
+                self._compressed_image_callback, SENSOR_QOS,
+            )
+        else:
+            self._sub_image = self.create_subscription(
+                Image, "/camera/front/image_raw",
+                self._image_callback, SENSOR_QOS,
+            )
         self._pub_detections = self.create_publisher(String, "/detected_objects", 10)
         self._pub_task_plan  = self.create_publisher(String, "/task_plan", 10)
 
@@ -115,7 +120,7 @@ class AIWorkerNode(Node):
         self._min_process_interval = float(os.environ.get("AI_PROCESS_MIN_INTERVAL", "0.08"))
         self._last_processed_at = 0.0
         self._start_upload_server(port=5000)
-        self.get_logger().info("AIWorkerNode started — waiting for images")
+        self.get_logger().info(f"AIWorkerNode started — waiting for images ({camera_input})")
 
     def _start_upload_server(self, port: int) -> None:
         node = self

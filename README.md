@@ -21,11 +21,32 @@ Use `docker compose up --build` after changing source files or the Dockerfile.
 
 ---
 
+## Autonomy upgrade notes
+
+- Camera path is now source-aware:
+  - Dummy camera publishes to `/camera/source/dummy/*`
+  - FPS camera (from frontend) publishes to `/camera/source/fps/*` when FPS view is active
+  - `camera_mux_node` republishes the active source to canonical topics:
+    - `/camera/front/image_raw`
+    - `/camera/front/image_raw/compressed`
+    - `/camera/front/camera_info`
+- Base motion path is now arbitrated:
+  - Frontend publishes manual commands to `/cmd_vel/ui`
+  - `control_arbitrator_node` owns canonical `/cmd_vel` and mode state
+  - Mode command topic: `/robot/control_mode/set` (`auto` or `manual`)
+- Low-spec defaults remain lightweight:
+  - `REALISM_PROFILE=low` by default
+  - `SAVE_DATASET=false` by default
+
+---
+
 ## Services and ports
 
 | Service | What it does | Address |
 |---|---|---|
 | `dummy_robot` | Publishes all synthetic sensor topics + accepts control input | — |
+| `camera_mux` | Selects dummy/FPS camera source and republishes canonical camera topics | — |
+| `control_arbitrator` | Owns auto/manual mode and routes manual control to canonical `/cmd_vel` | — |
 | `ai_worker` | Subscribes to camera, detects objects, publishes AI topics + HTTP upload | `localhost:5000` |
 | `rosbridge` | WebSocket bridge for the frontend | `ws://localhost:9090` |
 | `foxglove_bridge` | Foxglove Studio WebSocket | `ws://localhost:8765` |
@@ -69,13 +90,15 @@ Open **http://localhost:8080** after `docker compose up`.
 | `1–7` | Arm states: HOME → SEARCH → APPROACH → LOWER → GRIP → LIFT → DROP |
 | D-pad buttons | Same as keyboard, touch-friendly |
 
-After 3 seconds without input the robot resumes its autonomous patrol loop.
+Use AUTO/MANUAL buttons in the UI:
+- **MANUAL**: D-pad/WASD commands are applied to robot base via `/cmd_vel/ui`.
+- **AUTO**: manual commands are ignored by arbitrator and dummy robot runs autonomous patrol loop.
 
 ### View modes
 
 - **ORBIT** — free camera, drag to rotate
 - **FOLLOW** — camera trails behind the robot
-- **FPS** — first-person from the robot's camera mount
+- **FPS** — first-person from the robot's camera mount, and FPS frames are published to ROS camera source topics
 
 ### Upload images to AI worker
 
@@ -118,6 +141,12 @@ docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /robot/events
 # Control mode (auto / manual)
 docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /robot/control_mode
 
+# Active camera source (dummy|fps)
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /camera/source/active
+
+# Camera source command
+docker compose exec dummy_robot /entrypoint.sh ros2 topic pub --once /camera/source/select std_msgs/msg/String "{data: fps}"
+
 # Topic publish rates
 docker compose exec dummy_robot /entrypoint.sh ros2 topic hz /odom
 docker compose exec dummy_robot /entrypoint.sh ros2 topic hz /joint_states
@@ -136,6 +165,8 @@ docker compose exec dummy_robot /entrypoint.sh ros2 topic bw /camera/front/image
 | `/camera/front/image_raw` | ~7 |
 | `/scan` | 8 |
 | `/detected_objects` | ~7 (tied to camera) |
+
+For low-spec hardware, FPS-source camera is intentionally throttled (~4 Hz).
 
 ---
 

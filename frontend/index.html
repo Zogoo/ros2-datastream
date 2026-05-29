@@ -21,6 +21,7 @@
 <div id="status-bar">
   <span id="conn-status" class="err">● DISCONNECTED</span>
   <span id="ctrl-mode-badge" class="badge-auto">AUTO</span>
+  <span id="cam-source-badge" class="badge-auto">CAM:DUMMY</span>
   <span id="robot-name">ONSEN ROBOT</span>
   <span id="clock">--:--:--</span>
   <span id="rec-indicator">◉ LIVE</span>
@@ -96,6 +97,10 @@
 
 <!-- ── Primary control bar ──────────────────────────────────────────────── -->
 <div id="control-bar">
+  <div id="drive-modes">
+    <button class="mode-btn active" data-drive-mode="auto">AUTO</button>
+    <button class="mode-btn" data-drive-mode="manual">MANUAL</button>
+  </div>
   <div id="view-modes">
     <button class="mode-btn active" data-mode="orbit" >ORBIT</button>
     <button class="mode-btn"        data-mode="follow">FOLLOW</button>

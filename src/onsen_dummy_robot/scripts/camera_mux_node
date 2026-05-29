@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from onsen_dummy_robot.camera_mux_node import main
+
+main()

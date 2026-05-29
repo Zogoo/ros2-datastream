@@ -9,7 +9,11 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('lib/' + package_name, ['scripts/dummy_stream_node']),
+        ('lib/' + package_name, [
+            'scripts/dummy_stream_node',
+            'scripts/camera_mux_node',
+            'scripts/control_arbitrator_node',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -21,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'dummy_stream_node = onsen_dummy_robot.dummy_stream_node:main',
+            'camera_mux_node = onsen_dummy_robot.camera_mux_node:main',
+            'control_arbitrator_node = onsen_dummy_robot.control_arbitrator_node:main',
         ],
     },
 )

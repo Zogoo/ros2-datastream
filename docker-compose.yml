@@ -6,6 +6,7 @@ x-ros-env: &ros-env
   RCUTILS_LOGGING_BUFFERED_STREAM: "1"
   RCUTILS_COLORIZED_OUTPUT: "1"
   SAVE_DATASET: ${SAVE_DATASET:-false}
+  REALISM_PROFILE: ${REALISM_PROFILE:-low}
 
 x-ros-base: &ros-base
   build: .
@@ -22,14 +23,29 @@ services:
       - ./dataset:/ros2_ws/dataset
       - ./output:/ros2_ws/output
     command: ros2 run onsen_dummy_robot dummy_stream_node
+    depends_on:
+      - control_arbitrator
+
+  camera_mux:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_dummy_robot camera_mux_node
+
+  control_arbitrator:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_dummy_robot control_arbitrator_node
 
   ai_worker:
     <<: *ros-base
     environment:
       <<: *ros-env
+      AI_CAMERA_INPUT: compressed
     command: ros2 run onsen_ai_worker ai_worker_node
     depends_on:
-      - dummy_robot
+      - camera_mux
 
   foxglove_bridge:
     <<: *ros-base
@@ -39,6 +55,7 @@ services:
       ros2 launch foxglove_bridge foxglove_bridge_launch.xml
       port:=8765
       address:=0.0.0.0
+    # port 8765 on host directly via network_mode: host
 
   rosbridge:
     <<: *ros-base
@@ -47,6 +64,9 @@ services:
     command: >
       ros2 launch rosbridge_server rosbridge_websocket_launch.xml
       port:=9090
+    # ws://localhost:9090 on host directly via network_mode: host
+    depends_on:
+      - dummy_robot
 
   frontend:
     build:
@@ -56,6 +76,7 @@ services:
     restart: unless-stopped
     depends_on:
       - rosbridge
+    # http://localhost:8080 on host directly via network_mode: host
 
   rosbag_recorder:
     <<: *ros-base

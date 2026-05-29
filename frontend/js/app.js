@@ -19,6 +19,9 @@ const ROOM     = { w: 5.0, d: 4.0, h: 3.0 };
 const CMD_VEL_HZ  = 10;   // publish rate while control is active
 const MAX_VX      = 0.35;  // m/s forward/back
 const MAX_WZ      = 0.80;  // rad/s rotation
+const FPS_CAM_HZ  = 4;
+const FPS_CAM_W   = 640;
+const FPS_CAM_H   = 480;
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
 const C = {
@@ -58,6 +61,7 @@ const state = {
   cmdWz:      0.0,
   manualMode: false,
   lastOdomTs: 0,
+  cameraSource: 'dummy',
 };
 
 // Keys currently held (movement)
@@ -76,8 +80,16 @@ let cameraMarker;
 
 // ─── ROS handles ──────────────────────────────────────────────────────────────
 let ros, pubCmdVel, pubArmAction;
+let pubModeSet, pubCamSourceSet;
+let pubFpsImageCompressed, pubFpsCamInfo;
+const rosSubscriptions = [];
 let cmdVelTimer = null;
 let lastAnimTs = performance.now();
+let fpsCamAccum = 0;
+const fpsCamCanvas = document.createElement('canvas');
+fpsCamCanvas.width = FPS_CAM_W;
+fpsCamCanvas.height = FPS_CAM_H;
+const fpsCamCtx = fpsCamCanvas.getContext('2d', { willReadFrequently: true });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // Bootstrap
@@ -96,6 +108,7 @@ function main() {
   setupKeyboard();
   setupDpad();
   setupArmButtons();
+  setupDriveModeButtons();
   setupViewModeButtons();
   setupShutterButton();
   setupUploadButton();
@@ -354,14 +367,32 @@ function connectROS() {
   ros.on('connection', () => {
     setConnStatus(true);
     pubCmdVel = new ROSLIB.Topic({
-      ros, name: '/cmd_vel', messageType: 'geometry_msgs/Twist',
+      ros, name: '/cmd_vel/ui', messageType: 'geometry_msgs/Twist',
     });
     pubArmAction = new ROSLIB.Topic({
       ros, name: '/arm/action', messageType: 'std_msgs/String',
     });
+    pubModeSet = new ROSLIB.Topic({
+      ros, name: '/robot/control_mode/set', messageType: 'std_msgs/String',
+    });
+    pubCamSourceSet = new ROSLIB.Topic({
+      ros, name: '/camera/source/select', messageType: 'std_msgs/String',
+    });
+    pubFpsImageCompressed = new ROSLIB.Topic({
+      ros, name: '/camera/source/fps/image_raw/compressed', messageType: 'sensor_msgs/CompressedImage',
+    });
+    pubFpsCamInfo = new ROSLIB.Topic({
+      ros, name: '/camera/source/fps/camera_info', messageType: 'sensor_msgs/CameraInfo',
+    });
     pubCmdVel.advertise();
     pubArmAction.advertise();
+    pubModeSet.advertise();
+    pubCamSourceSet.advertise();
+    pubFpsImageCompressed.advertise();
+    pubFpsCamInfo.advertise();
     subscribeAll();
+    publishModeSet('auto');
+    publishCameraSource('dummy');
   });
   ros.on('error', () => setConnStatus(false));
   ros.on('close', () => { setConnStatus(false); setTimeout(connectROS, 3000); });
@@ -377,12 +408,15 @@ function subscribeAll() {
   sub('/task_plan',                         'std_msgs/String',            300, onTaskPlan);
   sub('/robot/events',                      'std_msgs/String',            0,   onEvent);
   sub('/robot/control_mode',                'std_msgs/String',            200, onControlMode);
+  sub('/camera/source/active',              'std_msgs/String',            200, onCameraSourceActive);
 }
 
 function sub(name, type, throttle, cb) {
-  new ROSLIB.Topic({ ros, name, messageType: type, throttle_rate: throttle, queue_length: 1 })
-    .subscribe(cb);
+  const topic = new ROSLIB.Topic({ ros, name, messageType: type, throttle_rate: throttle, queue_length: 1 });
+  topic.subscribe(cb);
+  rosSubscriptions.push(topic);
 }
+
 
 function normalizeArmState(payload) {
   return {
@@ -479,7 +513,15 @@ function onControlMode(msg) {
     const badge = document.getElementById('ctrl-mode-badge');
     badge.textContent = state.manualMode ? 'MANUAL' : 'AUTO';
     badge.className   = state.manualMode ? 'badge-manual' : 'badge-auto';
+    document.querySelectorAll('.mode-btn[data-drive-mode]').forEach(btn =>
+      btn.classList.toggle('active', btn.dataset.driveMode === d.mode));
   } catch(_) {}
+}
+
+function onCameraSourceActive(msg) {
+  state.cameraSource = (msg.data || 'dummy').toLowerCase();
+  const badge = document.getElementById('cam-source-badge');
+  if (badge) badge.textContent = `CAM:${state.cameraSource.toUpperCase()}`;
 }
 
 // ── Publishing helpers ────────────────────────────────────────────────────────
@@ -500,6 +542,18 @@ function publishCmdVel(vx, wz) {
 function publishArmAction(payload) {
   if (!pubArmAction) return;
   pubArmAction.publish({ data: JSON.stringify(payload) });
+  _bumpPubCounter();
+}
+
+function publishModeSet(mode) {
+  if (!pubModeSet) return;
+  pubModeSet.publish({ data: mode });
+  _bumpPubCounter();
+}
+
+function publishCameraSource(source) {
+  if (!pubCamSourceSet) return;
+  pubCamSourceSet.publish({ data: source });
   _bumpPubCounter();
 }
 
@@ -622,6 +676,12 @@ function highlightDpadVisuals(vx, wz) {
 function setupArmButtons() {
   document.querySelectorAll('.arm-btn').forEach(btn => {
     btn.addEventListener('click', () => triggerArmState(btn.dataset.state));
+  });
+}
+
+function setupDriveModeButtons() {
+  document.querySelectorAll('.mode-btn[data-drive-mode]').forEach(btn => {
+    btn.addEventListener('click', () => publishModeSet(btn.dataset.driveMode));
   });
 }
 
@@ -831,8 +891,35 @@ function setupViewModeButtons() {
 function setViewMode(mode) {
   state.viewMode     = mode;
   controls.enabled   = (mode === 'orbit');
+  publishCameraSource(mode === 'fps' ? 'fps' : 'dummy');
   document.querySelectorAll('.mode-btn[data-mode]').forEach(b =>
     b.classList.toggle('active', b.dataset.mode === mode));
+}
+
+function publishFpsCameraFrame() {
+  if (state.viewMode !== 'fps') return;
+  if (!pubFpsImageCompressed || !pubFpsCamInfo) return;
+  fpsCamCtx.drawImage(renderer.domElement, 0, 0, FPS_CAM_W, FPS_CAM_H);
+  const nowMs = Date.now();
+  const sec = Math.floor(nowMs / 1000);
+  const nanosec = (nowMs % 1000) * 1e6;
+  const header = { stamp: { sec, nanosec }, frame_id: 'camera_front_link' };
+  const dataUrl = fpsCamCanvas.toDataURL('image/jpeg', 0.72);
+  pubFpsImageCompressed.publish({
+    header,
+    format: 'jpeg',
+    data: dataUrl.split(',')[1],
+  });
+  pubFpsCamInfo.publish({
+    header,
+    height: FPS_CAM_H,
+    width: FPS_CAM_W,
+    distortion_model: 'plumb_bob',
+    d: [0, 0, 0, 0, 0],
+    k: [520, 0, FPS_CAM_W / 2, 0, 520, FPS_CAM_H / 2, 0, 0, 1],
+    r: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    p: [520, 0, FPS_CAM_W / 2, 0, 0, 520, FPS_CAM_H / 2, 0, 0, 0, 1, 0],
+  });
 }
 
 function updateCameraForMode() {
@@ -972,6 +1059,11 @@ function animate(now = performance.now()) {
   applyJointsToRobot();   // run every frame so arm is smooth at 60fps
   updateCameraForMode();
   renderer.render(scene, threeCamera);
+  fpsCamAccum += dt;
+  if (fpsCamAccum >= 1 / FPS_CAM_HZ) {
+    publishFpsCameraFrame();
+    fpsCamAccum = 0;
+  }
 }
 
 function clockTick() {
