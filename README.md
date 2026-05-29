@@ -156,6 +156,42 @@ docker compose exec dummy_robot /entrypoint.sh ros2 topic hz /camera/front/image
 docker compose exec dummy_robot /entrypoint.sh ros2 topic bw /camera/front/image_raw
 ```
 
+## Topic guide (meaning + data to check)
+
+Use this as a practical reference during manual QA.
+
+| Topic | Type | Produced by | What it means | Key fields to inspect |
+|---|---|---|---|---|
+| `/odom` | `nav_msgs/Odometry` | `dummy_robot` | Robot pose and velocity in `odom` frame | `pose.pose.position.x/y`, `pose.pose.orientation`, `twist.twist.linear`, `twist.twist.angular.z` |
+| `/joint_states` | `sensor_msgs/JointState` | `dummy_robot` | Arm + wheel joint angles | `name[]`, `position[]` |
+| `/arm/state` | `std_msgs/String` (JSON) | `dummy_robot` | Arm state-machine status | JSON keys: `state`, `cycle_id`, `target_object_id`, `success_probability`, `manual_overrides` |
+| `/scan` | `sensor_msgs/LaserScan` | `dummy_robot` | 2D lidar ranges around robot | `ranges[]`, `angle_min`, `angle_max`, `range_max` |
+| `/robot/events` | `std_msgs/String` (JSON) | `dummy_robot` | Low-frequency event stream | JSON keys: `event`, `timestamp`, `robot_pose`, `steam_level`, `wet_floor` |
+| `/cmd_vel/ui` | `geometry_msgs/Twist` | `frontend` | Raw manual drive command from UI | `linear.x`, `angular.z` |
+| `/robot/control_mode/set` | `std_msgs/String` | `frontend` + `control_arbitrator` | Mode command (`auto` or `manual`) | `data` |
+| `/cmd_vel` | `geometry_msgs/Twist` | `control_arbitrator` | Canonical base command after arbitration | `linear.x`, `angular.z` |
+| `/robot/control_mode` | `std_msgs/String` (JSON) | `control_arbitrator` | Current mode + active command source | JSON keys: `mode`, `active_source`, `ui_fresh`, `vx`, `wz` |
+| `/camera/source/select` | `std_msgs/String` | `frontend` | Request camera source (`dummy` or `fps`) | `data` |
+| `/camera/source/active` | `std_msgs/String` | `camera_mux` | Current selected camera source | `data` (`dummy` or `fps`) |
+| `/camera/front/image_raw` | `sensor_msgs/Image` | `camera_mux` | Canonical uncompressed camera stream for ROS consumers | `height`, `width`, `encoding`, `data` |
+| `/camera/front/image_raw/compressed` | `sensor_msgs/CompressedImage` | `camera_mux` | Canonical compressed stream for UI and AI worker | `format`, `data` |
+| `/camera/front/camera_info` | `sensor_msgs/CameraInfo` | `camera_mux` | Intrinsics for canonical camera stream | `k`, `d`, `p`, `width`, `height` |
+| `/detected_objects` | `std_msgs/String` (JSON) | `ai_worker` | Perception output from camera frames | JSON keys: `timestamp`, `frame_id`, `objects[]` |
+| `/task_plan` | `std_msgs/String` (JSON) | `ai_worker` | Next high-level action proposal | JSON keys: `task`, `next_action`, `target_object_id`, `reason` |
+
+### Robot location quick check
+
+```bash
+# One sample
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /odom --once
+
+# Live stream
+docker compose exec dummy_robot /entrypoint.sh ros2 topic echo /odom
+```
+
+- Position: `pose.pose.position.x` and `pose.pose.position.y` (meters)
+- Heading: derived from `pose.pose.orientation` quaternion (UI `YAW` already converts this)
+
 ### Expected rates when healthy
 
 | Topic | Expected Hz |
@@ -231,7 +267,13 @@ For low-spec hardware, FPS-source camera is intentionally throttled (~4 Hz).
 
 ### `/robot/control_mode`
 ```json
-{ "mode": "manual", "vx": 0.35, "wz": 0.0 }
+{
+  "mode": "manual",
+  "active_source": "ui",
+  "ui_fresh": true,
+  "vx": 0.35,
+  "wz": 0.0
+}
 ```
 
 ### `/robot/events`
