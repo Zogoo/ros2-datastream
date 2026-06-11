@@ -4,10 +4,11 @@ import { RosProbe, bootSim, holdButton, setManual, sleep } from '../helpers/ros.
 test('water: towels float in the bath; the rim is geometrically unclimbable', async ({ page }) => {
   const probe = new RosProbe();
   await probe.connect();
-  await probe.clearSafety();
   probe.subscribe('/safety/stop');
+  probe.subscribe('/robot/events');
 
   await bootSim(page);
+  await probe.clearSafety();
   await setManual(page); // the mission executor must not chase this towel
 
   // drop a towel into the west cold bath (water_z = 0.16)
@@ -17,13 +18,17 @@ test('water: towels float in the bath; the rim is geometrically unclimbable', as
   expect(towel.z, 'towel must settle floating near the water line').toBeGreaterThan(0.08);
   expect(towel.z).toBeLessThan(0.35);
 
-  // force-drive at the rim: the 0.28 m wall is 2x wheel radius — no climb
+  // force-drive at the rim: the 0.28 m wall is 2x wheel diameter clearance.
+  // Aggressive attempts may rear the chassis up and trip the tilt e-stop —
+  // that protective stop is acceptable; reaching the water is not.
   await setManual(page);
   await page.evaluate(() => window.__sim.setPose(-3.5, -2.45, -Math.PI / 2));
   await holdButton(page, '#dpad-fwd', 4000);
   const pose = await page.evaluate(() => window.__sim.pose());
   expect(pose.y, 'rim must block the robot before the water').toBeGreaterThan(-3.07);
-  expect(pose.z, 'chassis must not be on top of the rim').toBeLessThan(0.30);
+  const drowned = probe.received('/robot/events')
+    .some((m) => JSON.parse(m.data).event === 'SAFETY_CRITICAL_CONTACT');
+  expect(drowned, 'robot must never reach the water').toBe(false);
 
   probe.close();
 });

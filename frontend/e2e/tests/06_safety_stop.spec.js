@@ -4,18 +4,24 @@ import { RosProbe, bootSim, holdButton, setManual, sleep } from '../helpers/ros.
 test('safety: hard impact latches e-stop, zeroes wheels, operator reset recovers', async ({ page }) => {
   const probe = new RosProbe();
   await probe.connect();
-  await probe.clearSafety();
   probe.subscribe('/robot/contacts');
   probe.subscribe('/safety/stop');
   probe.subscribe('/base/wheel_targets');
 
   await bootSim(page);
+  await probe.clearSafety();
   await setManual(page);
 
-  // ram the north corridor wall at full manual speed (a 2 kg stool would
-  // just get pushed — correct physics — so use an immovable obstacle)
-  await page.evaluate(() => window.__sim.setPose(0, 3.0, Math.PI / 2));
-  await holdButton(page, '#dpad-fwd', 4000);
+  // runaway scenario: launch at 2.5 m/s into the towel-bin wall while the
+  // D-pad keeps the wheels pushing (manual top speed alone gives a borderline
+  // ~3 N·s impulse the suspension soaks up; a 2 kg stool would just get
+  // pushed — correct physics either way)
+  await page.evaluate(() => window.__sim.setPose(0, 3.4, Math.PI / 2));
+  const fwd = page.locator('#dpad-fwd');
+  await fwd.dispatchEvent('pointerdown');  // wheels keep pushing through the flight
+  await page.evaluate(() => window.__sim.setVelocity(0, 2.5));
+  await sleep(2000);
+  await fwd.dispatchEvent('pointerup');
 
   await probe.waitFor('/robot/contacts',
     (m) => JSON.parse(m.data).impulse >= 3.0, 20_000, 'hard contact event');

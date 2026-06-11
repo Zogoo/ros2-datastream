@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { bootSim } from '../helpers/ros.js';
+import { bootSim, setManual } from '../helpers/ros.js';
 
 test('skins: preset retextures towels and resyncs the AI detection profile', async ({ page }) => {
   await bootSim(page);
+  await setManual(page); // mode persists ROS-side — park the mission executor
 
   const defaults = await page.evaluate(async () =>
     (await (await fetch('/api/profiles')).json()).towel);

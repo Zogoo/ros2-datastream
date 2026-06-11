@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { armFk, gripperOpening, isGripperClosed, servoStep } from './kinematics.js';
-import { GROUP_ARM, GROUP_WORLD, groups } from '../physics/world.js';
+import { GROUP_ARM, GROUP_ROBOT, GROUP_WORLD, groups } from '../physics/world.js';
 
 const GRAVITY = 9.81;
 
@@ -147,8 +147,9 @@ export class Arm {
       { w: 1, x: 0, y: 0, z: 0 },
     );
     this.graspJoint = world.createImpulseJoint(params, this.gripperBody, item.body, true);
-    // The fingers hold it now — stop the gripper ball collider fighting the joint.
-    item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff & ~GROUP_ARM));
+    // The fingers hold it now — stop the gripper/chassis colliders fighting the
+    // joint (the pan sweep would otherwise drag it through the basket walls).
+    item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff & ~(GROUP_ARM | GROUP_ROBOT)));
     item.held = true;
     this.heldItem = item;
   }

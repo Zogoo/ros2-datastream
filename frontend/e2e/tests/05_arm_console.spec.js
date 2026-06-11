@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { RosProbe, bootSim } from '../helpers/ros.js';
+import { RosProbe, bootSim, setManual } from '../helpers/ros.js';
 
 // Replays the firmware test transcript from the brief end-to-end through
 // the FE console -> rosbridge -> arm_controller -> /arm/response.
@@ -10,6 +10,7 @@ test('arm console: serial-protocol transcript round-trips through ROS', async ({
   probe.subscribe('/arm/state');
 
   await bootSim(page);
+  await setManual(page); // mode persists ROS-side — park the mission executor
   await page.locator('#console-toggle').click();
 
   const send = async (line) => {

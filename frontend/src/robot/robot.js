@@ -27,11 +27,13 @@ export class Robot {
     );
 
     const c = spec.chassis;
-    // Low friction = the smooth ABS skirt / skid plate; it lets the beveled
-    // nose slide up step corners instead of wedging (34 deg approach angle).
+    // Friction tuned for the smooth ABS skirt: low enough that the beveled
+    // nose slides over step corners below the 60 mm clearance (34 deg
+    // approach angle) instead of wedging, high enough that the flat front
+    // face cannot ratchet up the 280 mm bath rim.
     const tub = physics.R.ColliderDesc.cuboid(c.size[0] / 2, c.size[1] / 2, c.size[2] / 2)
       .setMass(c.mass)
-      .setFriction(0.05)
+      .setFriction(0.15)
       .setCollisionGroups(groups(GROUP_ROBOT, GROUP_WORLD))
       .setActiveEvents(physics.R.ActiveEvents.COLLISION_EVENTS | physics.R.ActiveEvents.CONTACT_FORCE_EVENTS)
       .setContactForceEventThreshold(1.0);

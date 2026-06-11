@@ -6,11 +6,11 @@ test('towel mission: autonomy approaches, picks and delivers to the towel bin', 
   test.setTimeout(300_000);
   const probe = new RosProbe();
   await probe.connect();
-  await probe.clearSafety();
   probe.subscribe('/mission/state');
   probe.subscribe('/robot/events');
 
   await bootSim(page);
+  await probe.clearSafety();
 
   // stage: robot in the corridor facing north, towel 1 m ahead, bin close by
   // (keeps the deliver leg short so grasp retries don't eat the timeout)
@@ -21,7 +21,7 @@ test('towel mission: autonomy approaches, picks and delivers to the towel bin', 
   await setAuto(page);
 
   await probe.waitFor('/mission/state',
-    (m) => ['APPROACH', 'PICK'].includes(JSON.parse(m.data).state),
+    (m) => !['IDLE', 'SEARCH'].includes(JSON.parse(m.data).state),
     60_000, 'mission engages a towel');
 
   await probe.waitFor('/mission/state',

@@ -5,11 +5,11 @@ import { RosProbe, bootSim, setManual, sleep } from '../helpers/ros.js';
 test('stairs: suspension climbs the resting-deck steps without e-stop', async ({ page }) => {
   const probe = new RosProbe();
   await probe.connect();
-  await probe.clearSafety();
   probe.subscribe('/imu', 100);
   probe.subscribe('/safety/stop');
 
   await bootSim(page);
+  await probe.clearSafety();
   await setManual(page);
   await page.evaluate(() => window.__sim.setPose(-2.6, 1.3, Math.PI));
   const before = await page.evaluate(() => window.__sim.pose());
@@ -19,7 +19,7 @@ test('stairs: suspension climbs the resting-deck steps without e-stop', async ({
   const btn = page.locator('#dpad-fwd');
   await btn.dispatchEvent('pointerdown');
   let pose = before;
-  for (let i = 0; i < 40 && pose.x > -3.97; i++) {
+  for (let i = 0; i < 40 && pose.x > -4.05; i++) {
     await sleep(200);
     pose = await page.evaluate(() => window.__sim.pose());
   }
@@ -27,7 +27,7 @@ test('stairs: suspension climbs the resting-deck steps without e-stop', async ({
   await sleep(800);
   const after = await page.evaluate(() => window.__sim.pose());
 
-  expect(after.x, 'front wheels must be up on the deck').toBeLessThan(-3.9);
+  expect(after.x, 'front wheels must be up on the deck').toBeLessThan(-3.95);
   expect(after.z, 'chassis must have climbed both risers').toBeGreaterThan(before.z + 0.05);
 
   const imuZ = probe.received('/imu').map((m) => m.linear_acceleration.z);

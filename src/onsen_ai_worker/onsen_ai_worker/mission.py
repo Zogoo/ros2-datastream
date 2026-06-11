@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 SCOOP_FORWARD = 0.667     # m, fingertip ahead of base center at PICK_SCOOP
-DROP_OFFSET = (0.27, 0.26)  # m, release point in base_link at DROP_RELEASE (pan 178)
+DROP_OFFSET = (0.28, 0.66)  # m, release point in base_link at DROP_BIN (pan 178, extended)
 PICK_TOL_X = 0.08
 PICK_TOL_Y = 0.08
 ARRIVE_TOL = 0.10
@@ -23,7 +23,7 @@ PICK_SEQUENCE = [
     "A PRE_PICK", "A PICK_LOWER", "A PICK_SCOOP",
     "A PICK_GRIP", "A PICK_LIFT", "A PICK_RETRACT",
 ]
-DROP_SEQUENCE = ["A DROP_BASKET", "A DROP_RELEASE", "A HOME"]
+DROP_SEQUENCE = ["A DROP_BIN", "A DROP_BIN_RELEASE", "A HOME"]
 
 
 @dataclass

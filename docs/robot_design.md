@@ -94,6 +94,11 @@ Known limitations (documented, mitigated):
   tracking error in `/joint_states`
 - Payload check: 0.3 kg towel at full reach ≈ 2.1 N·m at the shoulder — inside
   bus-servo torque (~25 kg·cm geared)
+- Two drop poses: `DROP_BASKET` (pan 178°, release over the onboard basket at
+  0.37 m radius) and `DROP_BIN` (pan 178°, extended links, release 0.72 m from
+  base center at z 0.66) — the extended pose exists because the robot body can
+  never get closer than bin-half + robot-half ≈ 0.62 m to a floor bin's center,
+  so the basket-radius drop physically cannot reach over a bin rim
 - **Grasp is a physics joint**: closing the gripper within the grasp radius
   creates a fixed joint to the still-dynamic towel; carried mass is pushed
   back onto the chassis (suspension visibly settles); release restores normal

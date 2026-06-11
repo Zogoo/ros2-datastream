@@ -44,7 +44,7 @@
     "joint_ratio": 1.5,
     "max_joint_speed_dps": 200.0,
     "servo_lag_tau_s": 0.08,
-    "gripper": { "max_opening_m": 0.09, "grasp_radius_m": 0.10, "close_deg_threshold": 30.0 }
+    "gripper": { "max_opening_m": 0.09, "grasp_radius_m": 0.14, "close_deg_threshold": 30.0 }
   },
   "sensors": {
     "lidar": {

@@ -45,6 +45,8 @@ ACTIONS: dict[str, list[float] | None] = {
     "PICK_RETRACT":  [90, 95, 80, 70, 90, 12],
     "DROP_BASKET":   [178, 100, 85, 85, 90, 12],
     "DROP_RELEASE":  [178, 100, 85, 85, 90, 75],
+    "DROP_BIN":      [178, 130, 73, 90, 90, 12],
+    "DROP_BIN_RELEASE": [178, 130, 73, 90, 90, 75],
     "OPEN_GRIPPER":  None,
     "CLOSE_GRIPPER": None,
     "GRIPPER_HALF":  None,

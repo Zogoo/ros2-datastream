@@ -6,6 +6,7 @@ The FSM is fed the same shapes the executor node builds from
 import math
 
 from onsen_ai_worker.mission import (
+    DROP_OFFSET,
     DROP_SEQUENCE,
     PICK_SEQUENCE,
     SCOOP_FORWARD,
@@ -154,7 +155,7 @@ class TestDelivery:
         assert logic.state == "TO_BIN"
 
         # teleport to the standoff point -> ALIGN_BIN
-        standoff = math.hypot(0.27, 0.26)
+        standoff = math.hypot(*DROP_OFFSET)
         near_pose = {"x": 0.0, "y": BIN_CENTER[1] - standoff, "yaw": math.pi / 2}
         logic.update(make_input(near_pose, holding=True))
         assert logic.state == "ALIGN_BIN"

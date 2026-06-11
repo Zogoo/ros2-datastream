@@ -4,11 +4,11 @@ import { RosProbe, bootSim, holdButton, setManual } from '../helpers/ros.js';
 test('manual drive: D-pad forward advances /odom and spins wheels', async ({ page }) => {
   const probe = new RosProbe();
   await probe.connect();
-  await probe.clearSafety();
   probe.subscribe('/odom');
   probe.subscribe('/base/wheel_targets');
 
   await bootSim(page);
+  await probe.clearSafety();
   await setManual(page);
 
   // face up the open corridor so 2 s of driving is unobstructed

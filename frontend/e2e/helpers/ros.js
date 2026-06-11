@@ -59,7 +59,10 @@ export class RosProbe {
       if (hit) return hit;
       await sleep(200);
     }
-    throw new Error(`timeout waiting for ${label} (${this.received(topic).length} msgs seen)`);
+    const last = JSON.stringify(this.received(topic).at(-1) ?? null).slice(0, 300);
+    throw new Error(
+      `timeout waiting for ${label} (${this.received(topic).length} msgs seen, last=${last})`,
+    );
   }
 
   close() {
