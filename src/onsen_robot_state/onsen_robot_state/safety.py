@@ -92,6 +92,13 @@ class SafetyMonitor:
         self._critical = False
         return True
 
+    def force_clear(self) -> None:
+        """Unconditional clear — used when the e-stop feature is disarmed."""
+        self._latched = False
+        self._critical = False
+        self._tilt_active = False
+        self._events = []
+
     def drain_events(self) -> list[SafetyEvent]:
         events = self._events
         self._events = []

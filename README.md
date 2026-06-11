@@ -47,6 +47,7 @@ Rebuild after code changes: `docker compose up --build`.
 | `T` / THROW TOWEL | Toss a towel from a random direction |
 | `1–9` | Arm poses (HOME … DROP_RELEASE) |
 | AUTO / MANUAL | Control arbitration mode |
+| E-STOP: OFF/ARMED | Arm the safety latch (optional, off by default; armed = hard impacts/tilt/water latch `/safety/stop`) |
 | ORBIT / FOLLOW / FPS | Camera views |
 | DRAG | Pick up and fling any movable object with the mouse |
 | SKINS | Re-texture object classes/instances, sync AI detection profiles |

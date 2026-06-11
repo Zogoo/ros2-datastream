@@ -15,7 +15,9 @@ This file previously tracked the v2 gap audit; everything in it is resolved.
 - **Skins**: per-instance skins + bundled presets (RYOKAN/STRIPED/CHARCOAL) +
   detection-eval notebook (`03_skin_detection_eval.ipynb`, recall 0.87→0.00→0.95)
 - **Safety**: arm DROP-sector scan self-filter; `warning()` logger fix
-  (`.warn` crashes nodes on this rclpy — it killed the aggregator mid-e-stop)
+  (`.warn` crashes nodes on this rclpy — it killed the aggregator mid-e-stop);
+  e-stop latching is now **opt-in** (FE `E-STOP` toggle -> `/safety/enable`,
+  default disarmed, `SAFETY_ENABLED=true` to arm at boot)
 - **Depth camera**: 320×240 per plan
 - **Tests**: 70 pytest (safety latching/self-filter, mission FSM, planner,
   detection/skins, LLM client, protocol transcripts) + 22 vitest + ruff + mypy,

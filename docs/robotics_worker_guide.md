@@ -46,7 +46,12 @@ only the aggregator can (by dropping `/safety/stop`).
 
 ## Safety aggregator (`onsen_robot_state`)
 
-`SafetyMonitor` (pure logic, `safety.py`) implements PLC-style latching:
+The e-stop latch is **opt-in**: disarmed by default (`SAFETY_ENABLED=false`),
+armed via the FE `E-STOP` toggle (`/safety/enable`) or env. While disarmed the
+aggregator still fuses `/robot/state` (incl. contacts/tilt telemetry) but never
+latches `/safety/stop`; disarming clears any active latch.
+
+`SafetyMonitor` (pure logic, `safety.py`) implements PLC-style latching when armed:
 
 | Trigger | Source | Latch |
 |---|---|---|
