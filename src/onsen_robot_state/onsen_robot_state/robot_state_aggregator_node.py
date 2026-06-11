@@ -42,6 +42,7 @@ SENSOR_QOS = QoSProfile(
 )
 
 SPEC_PATH = os.environ.get("ROBOT_SPEC_PATH", "/ros2_ws/shared/robot_spec.json")
+SAFETY_ENABLED_DEFAULT = os.environ.get("SAFETY_ENABLED", "false").lower() == "true"
 
 
 def _load_safety_spec() -> dict:
@@ -60,6 +61,7 @@ class RobotStateAggregatorNode(Node):
             impulse_threshold=float(spec["contact_impulse_stop_threshold"]),
             tilt_limit_deg=float(spec["tilt_stop_deg"]),
         )
+        self._enabled = SAFETY_ENABLED_DEFAULT
         self._tilt_deg = 0.0
         self._odom: dict = {}
         self._min_scan: float | None = None
@@ -78,12 +80,14 @@ class RobotStateAggregatorNode(Node):
         self.create_subscription(String, topics.ARM_STATE, self._on_arm_state, 10)
         self.create_subscription(String, topics.BASE_STATE, self._on_base_state, 10)
         self.create_subscription(Bool, topics.SAFETY_RESET, self._on_reset, 10)
+        self.create_subscription(Bool, topics.SAFETY_ENABLE, self._on_enable, 10)
 
         self.create_timer(0.10, self._publish_stop)
         self.create_timer(0.20, self._publish_state)
         self.get_logger().info(
-            f"RobotStateAggregator ready — impulse>={self._monitor.impulse_threshold} Ns, "
-            f"tilt>={self._monitor.tilt_limit_deg} deg latch /safety/stop",
+            f"RobotStateAggregator ready — e-stop {'ARMED' if self._enabled else 'disarmed'}; "
+            f"impulse>={self._monitor.impulse_threshold} Ns, "
+            f"tilt>={self._monitor.tilt_limit_deg} deg latch /safety/stop when armed",
         )
 
     # ── Inputs ────────────────────────────────────────────────────────────────
@@ -94,6 +98,8 @@ class RobotStateAggregatorNode(Node):
         except json.JSONDecodeError:
             return
         self._last_contact = contact
+        if not self._enabled:
+            return
         triggered = self._monitor.on_contact(
             impulse=float(contact.get("impulse", 0.0)),
             critical=bool(contact.get("critical", False)),
@@ -112,7 +118,7 @@ class RobotStateAggregatorNode(Node):
         # tilt = angle between body z-axis and world up
         up_z = 1.0 - 2.0 * (q.x * q.x + q.y * q.y)
         self._tilt_deg = math.degrees(math.acos(max(-1.0, min(1.0, up_z))))
-        if self._monitor.on_tilt(self._tilt_deg):
+        if self._enabled and self._monitor.on_tilt(self._tilt_deg):
             self._emit_safety_events()
             self._publish_stop()
             self.get_logger().warning(f"E-STOP: tilt {self._tilt_deg:.1f} deg")
@@ -147,6 +153,16 @@ class RobotStateAggregatorNode(Node):
             self.get_logger().warning("Safety reset refused — hazard still active")
         self._publish_stop()
 
+    def _on_enable(self, msg: Bool) -> None:
+        enable = bool(msg.data)
+        if enable == self._enabled:
+            return
+        self._enabled = enable
+        if not enable:
+            self._monitor.force_clear()
+        self.get_logger().info(f"E-stop {'ARMED' if enable else 'disarmed — latches cleared'}")
+        self._publish_stop()
+
     # ── Outputs ───────────────────────────────────────────────────────────────
 
     def _emit_safety_events(self) -> None:
@@ -162,6 +178,7 @@ class RobotStateAggregatorNode(Node):
 
     def _publish_state(self) -> None:
         self._pub_state.publish(String(data=json.dumps({
+            "safety_enabled": self._enabled,
             "safety_stop": self._monitor.stop,
             "safety_critical": self._monitor.critical,
             "tilt_deg": round(self._tilt_deg, 2),

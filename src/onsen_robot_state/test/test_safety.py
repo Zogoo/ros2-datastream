@@ -76,6 +76,18 @@ class TestTilt:
         assert len(m.drain_events()) == 1
 
 
+class TestForceClear:
+    def test_disarm_clears_everything_even_while_tilted(self):
+        m = monitor()
+        m.on_contact(0.2, True, WATER_INGRESS)
+        m.on_tilt(40.0)
+        assert m.stop is True
+        m.force_clear()
+        assert m.stop is False
+        assert m.critical is False
+        assert m.drain_events() == []
+
+
 class TestArmScanSelfFilter:
     def test_drop_phase_detection(self):
         assert arm_in_drop_phase({"last_action": "DROP_BASKET", "status": "MOVING"})

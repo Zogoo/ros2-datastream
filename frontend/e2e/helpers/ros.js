@@ -89,6 +89,12 @@ export async function setAuto(page) {
   await page.locator('[data-drive-mode="auto"]').click();
 }
 
+/** E-stop latching is opt-in (disarmed by default) — safety scenarios arm it. */
+export async function armSafety(page) {
+  const btn = page.locator('#estop-arm-btn');
+  if ((await btn.textContent()).includes('OFF')) await btn.click();
+}
+
 /** Holds a D-pad button for ms (pointer events drive /cmd_vel/ui). */
 export async function holdButton(page, selector, ms) {
   const btn = page.locator(selector);

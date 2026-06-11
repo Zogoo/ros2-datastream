@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
-import { RosProbe, bootSim, holdButton, setManual, sleep } from '../helpers/ros.js';
+import { RosProbe, armSafety, bootSim, setManual, sleep } from '../helpers/ros.js';
 
-test('safety: hard impact latches e-stop, zeroes wheels, operator reset recovers', async ({ page }) => {
+test('safety: armed e-stop latches on hard impact, zeroes wheels, operator reset recovers', async ({ page }) => {
   const probe = new RosProbe();
   await probe.connect();
   probe.subscribe('/robot/contacts');
@@ -11,17 +11,19 @@ test('safety: hard impact latches e-stop, zeroes wheels, operator reset recovers
   await bootSim(page);
   await probe.clearSafety();
   await setManual(page);
+  await armSafety(page); // latching only happens while the UI has armed it
 
-  // runaway scenario: launch at 2.5 m/s into the towel-bin wall while the
-  // D-pad keeps the wheels pushing (manual top speed alone gives a borderline
-  // ~3 N·s impulse the suspension soaks up; a 2 kg stool would just get
-  // pushed — correct physics either way)
-  await page.evaluate(() => window.__sim.setPose(0, 3.4, Math.PI / 2));
-  const fwd = page.locator('#dpad-fwd');
-  await fwd.dispatchEvent('pointerdown');  // wheels keep pushing through the flight
-  await page.evaluate(() => window.__sim.setVelocity(0, 2.5));
-  await sleep(2000);
-  await fwd.dispatchEvent('pointerup');
+  // climb onto the resting deck and ram lounger_2 — wedging heavy furniture
+  // under drive reliably produces a >3 N·s contact (flat wall pushes don't:
+  // the suspension spreads those out, and light props just get shoved)
+  await page.evaluate(() => window.__sim.setPose(-3.2, 0.6, Math.PI));
+  const btn = page.locator('#dpad-fwd');
+  await btn.dispatchEvent('pointerdown');
+  for (let i = 0; i < 45; i++) {
+    await sleep(200);
+    if (await page.evaluate(() => window.__sim.safetyStop())) break;
+  }
+  await btn.dispatchEvent('pointerup');
 
   await probe.waitFor('/robot/contacts',
     (m) => JSON.parse(m.data).impulse >= 3.0, 20_000, 'hard contact event');
@@ -31,7 +33,9 @@ test('safety: hard impact latches e-stop, zeroes wheels, operator reset recovers
   // wheel targets must zero regardless of operator input
   await sleep(500);
   probe.clear('/base/wheel_targets');
-  await holdButton(page, '#dpad-fwd', 800);
+  await btn.dispatchEvent('pointerdown');
+  await sleep(800);
+  await btn.dispatchEvent('pointerup');
   const targets = probe.received('/base/wheel_targets').map((m) => JSON.parse(m.data).w);
   expect(targets.length).toBeGreaterThan(0);
   for (const w of targets) {

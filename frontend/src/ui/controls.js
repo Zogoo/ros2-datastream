@@ -45,6 +45,16 @@ export class Controls {
     for (const btn of document.querySelectorAll('[data-drive-mode]')) {
       btn.addEventListener('click', () => this.setMode(btn.dataset.driveMode, true));
     }
+
+    // E-stop is opt-in: latching in the safety aggregator only happens while armed.
+    this.safetyArmed = false;
+    const armBtn = document.getElementById('estop-arm-btn');
+    armBtn.addEventListener('click', () => {
+      this.safetyArmed = !this.safetyArmed;
+      armBtn.textContent = `E-STOP: ${this.safetyArmed ? 'ARMED' : 'OFF'}`;
+      armBtn.classList.toggle('active', this.safetyArmed);
+      this.ros.publish(TOPICS.safetyEnable, { data: this.safetyArmed });
+    });
     for (const btn of document.querySelectorAll('#arm-pose-btns .arm-btn')) {
       btn.addEventListener('click', () => this.ros.publish(TOPICS.armCommand, { data: btn.dataset.cmd }));
     }

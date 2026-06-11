@@ -23,6 +23,7 @@ export const TOPICS = {
   // FE publishes (control)
   cmdVelUi: { name: '/cmd_vel/ui', type: 'geometry_msgs/Twist' },
   controlModeSet: { name: '/robot/control_mode/set', type: 'std_msgs/String' },
+  safetyEnable: { name: '/safety/enable', type: 'std_msgs/Bool' },
   armCommand: { name: '/arm/command', type: 'std_msgs/String' },
   baseCommand: { name: '/base/command', type: 'std_msgs/String' },
 

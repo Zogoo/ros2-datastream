@@ -48,6 +48,7 @@ BASE_STATE = "/base/state"
 # Safety / fused state (this package)
 SAFETY_STOP = "/safety/stop"
 SAFETY_RESET = "/safety/reset"
+SAFETY_ENABLE = "/safety/enable"
 ROBOT_STATE = "/robot/state"
 
 # Perception / autonomy

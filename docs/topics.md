@@ -58,9 +58,10 @@ Names live in exactly two mirrored registries:
 
 | Topic | Direction | Payload |
 |---|---|---|
-| `/safety/stop` | out 10 Hz | `std_msgs/Bool` latched e-stop |
+| `/safety/stop` | out 10 Hz | `std_msgs/Bool` latched e-stop (always `false` while disarmed) |
 | `/safety/reset` | in | `std_msgs/Bool` operator reset (refused while hazard active) |
-| `/robot/state` | out 5 Hz | fused JSON: `{safety_stop, safety_critical, tilt_deg, min_obstacle_m, arm_scan_filter, odom, arm, base, last_contact}` |
+| `/safety/enable` | in | `std_msgs/Bool` arm/disarm the e-stop latch (FE `E-STOP` toggle; default disarmed, `SAFETY_ENABLED=true` to arm at boot); disarming clears latches |
+| `/robot/state` | out 5 Hz | fused JSON: `{safety_enabled, safety_stop, safety_critical, tilt_deg, min_obstacle_m, arm_scan_filter, odom, arm, base, last_contact}` |
 | `/robot/events` | out | safety + sim events (`SAFETY_IMPACT`, `OBJECT_BINNED`, `TOWEL_THROWN`, …) |
 
 ## Perception + autonomy (`ai_worker`, `mission_executor`)

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { RosProbe, bootSim, holdButton, setManual, sleep } from '../helpers/ros.js';
+import { RosProbe, armSafety, bootSim, holdButton, setManual, sleep } from '../helpers/ros.js';
 
 test('water: towels float in the bath; the rim is geometrically unclimbable', async ({ page }) => {
   const probe = new RosProbe();
@@ -10,6 +10,7 @@ test('water: towels float in the bath; the rim is geometrically unclimbable', as
   await bootSim(page);
   await probe.clearSafety();
   await setManual(page); // the mission executor must not chase this towel
+  await armSafety(page); // water/tilt protection is part of this scenario
 
   // drop a towel into the west cold bath (water_z = 0.16)
   const towelId = await page.evaluate(() => window.__sim.spawn('towel', -3.5, -3.8, 0.8));
