@@ -1,0 +1,25 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src/onsen_ai_worker", "src/onsen_dummy_robot", "src/onsen_robot_state"]
+extend-exclude = ["**/notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  "SIM105", # contextlib.suppress is less readable in tight node callbacks
+  "SIM108", # ternaries are not always clearer
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/test/*" = ["RUF012"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
+explicit_package_bases = true
+mypy_path = "src/onsen_ai_worker:src/onsen_dummy_robot:src/onsen_robot_state"
+exclude = "(setup\\.py|notebooks)"

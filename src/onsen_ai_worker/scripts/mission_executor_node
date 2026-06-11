@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from onsen_ai_worker.mission_executor_node import main
+main()

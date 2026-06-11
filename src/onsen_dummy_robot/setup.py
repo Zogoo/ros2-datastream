@@ -11,8 +11,9 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('lib/' + package_name, [
             'scripts/dummy_stream_node',
-            'scripts/camera_mux_node',
             'scripts/control_arbitrator_node',
+            'scripts/arm_controller_node',
+            'scripts/base_controller_node',
         ]),
     ],
     install_requires=['setuptools'],
@@ -25,8 +26,9 @@ setup(
     entry_points={
         'console_scripts': [
             'dummy_stream_node = onsen_dummy_robot.dummy_stream_node:main',
-            'camera_mux_node = onsen_dummy_robot.camera_mux_node:main',
             'control_arbitrator_node = onsen_dummy_robot.control_arbitrator_node:main',
+            'arm_controller_node = onsen_dummy_robot.arm_controller_node:main',
+            'base_controller_node = onsen_dummy_robot.base_controller_node:main',
         ],
     },
 )

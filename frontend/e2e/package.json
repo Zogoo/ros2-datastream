@@ -1,0 +1,9 @@
+{
+  "name": "onsen-e2e",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "1.49.0",
+    "ws": "^8.18.0"
+  }
+}

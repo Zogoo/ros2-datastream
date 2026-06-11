@@ -9,7 +9,10 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('lib/' + package_name, ['scripts/ai_worker_node']),
+        ('lib/' + package_name, [
+            'scripts/ai_worker_node',
+            'scripts/mission_executor_node',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -21,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'ai_worker_node = onsen_ai_worker.ai_worker_node:main',
+            'mission_executor_node = onsen_ai_worker.mission_executor_node:main',
         ],
     },
 )

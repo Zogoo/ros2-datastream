@@ -633,7 +633,7 @@ class SceneGenerator:
         angle_deg: float, color: tuple,
     ) -> tuple[int, int, int, int]:
         box = cv2.boxPoints(((float(cx), float(cy)), (float(w), float(h)), angle_deg))
-        box = np.int32(box)
+        box = box.astype(np.int32)
         cv2.fillPoly(img, [box], color)
         cv2.polylines(img, [box], True, SceneGenerator._darken(color, 20), 1)
         xs, ys = box[:, 0], box[:, 1]
