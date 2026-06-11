@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Onsen Robot Simulator</title>
+  <script type="module" crossorigin src="/assets/index-DBU8Y2NM.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-NkPVeWz8.css">
+</head>
+<body>
+
+<div id="status-bar">
+  <span id="conn-status" class="err">&#9679; DISCONNECTED</span>
+  <span id="ctrl-mode-badge" class="badge-auto">AUTO</span>
+  <span id="estop-badge" class="hidden">E-STOP</span>
+  <span id="robot-name">ONSEN ROBOT SIM v2</span>
+  <span id="sim-fps">-- FPS</span>
+  <span id="clock">--:--:--</span>
+  <span id="pub-counter">TX:0</span>
+</div>
+
+<div id="viewfinder">
+  <div class="hud-panel" id="hud-arm">
+    <div class="hud-label">ARM</div>
+    <div id="arm-status-val">IDLE</div>
+    <div id="arm-joints-val">90 90 90 90 90 70</div>
+    <div id="basket-count">BASKET: 0</div>
+  </div>
+
+  <div class="hud-panel" id="hud-detect">
+    <div class="hud-label">DETECTIONS</div>
+    <div id="detect-count">0 objects</div>
+    <div id="detect-list"></div>
+  </div>
+
+  <div class="hud-panel" id="hud-mission">
+    <div class="hud-label">MISSION</div>
+    <div id="mission-state">--</div>
+    <div id="task-reason"></div>
+  </div>
+
+  <div id="event-ticker"></div>
+
+  <div id="pose-bar">
+    X:<span id="px">0.00</span> Y:<span id="py">0.00</span> YAW:<span id="pyaw">0.0</span>&deg;
+    ODO X:<span id="ox">0.00</span> Y:<span id="oy">0.00</span>
+  </div>
+
+  <div id="dpad" title="W/S/A/D, arrows or gamepad">
+    <button class="dpad-btn dpad-fwd"   id="dpad-fwd">&#9650;</button>
+    <button class="dpad-btn dpad-left"  id="dpad-left">&#9664;</button>
+    <button class="dpad-btn dpad-stop"  id="dpad-stop">&#9632;</button>
+    <button class="dpad-btn dpad-right" id="dpad-right">&#9654;</button>
+    <button class="dpad-btn dpad-back"  id="dpad-back">&#9660;</button>
+  </div>
+
+  <div id="lidar-panel">
+    <div class="panel-label">LIDAR 360&deg;</div>
+    <canvas id="lidar-canvas" width="160" height="160"></canvas>
+  </div>
+
+  <div id="cam-panel">
+    <div class="panel-label" id="cam-panel-label">CAM FRONT</div>
+    <canvas id="cam-pip" width="160" height="120"></canvas>
+  </div>
+</div>
+
+<div id="control-bar">
+  <div id="drive-modes">
+    <button class="mode-btn active" data-drive-mode="auto">AUTO</button>
+    <button class="mode-btn" data-drive-mode="manual">MANUAL</button>
+  </div>
+  <div id="view-modes">
+    <button class="mode-btn active" data-view="orbit">ORBIT</button>
+    <button class="mode-btn" data-view="follow">FOLLOW</button>
+    <button class="mode-btn" data-view="fps">FPS</button>
+  </div>
+  <div id="scenario-controls">
+    <button class="mode-btn" id="throw-towel-btn">THROW TOWEL</button>
+    <button class="mode-btn" id="drag-mode-btn">DRAG: OFF</button>
+    <button class="mode-btn" id="reset-scene-btn">RESET</button>
+  </div>
+  <button id="skins-toggle" class="mode-btn">SKINS</button>
+  <button id="upload-btn" class="mode-btn" title="Send a frame to the AI worker">AI UPLOAD</button>
+  <input type="file" id="upload-input" accept="image/*" class="hidden" />
+</div>
+
+<div id="arm-bar">
+  <span class="bar-label">ARM:</span>
+  <div id="arm-pose-btns">
+    <button class="arm-btn" data-cmd="A HOME">HOME</button>
+    <button class="arm-btn" data-cmd="A READY">READY</button>
+    <button class="arm-btn" data-cmd="A STOW">STOW</button>
+    <button class="arm-btn" data-cmd="A PRE_PICK">PRE</button>
+    <button class="arm-btn" data-cmd="A PICK_LOWER">LOWR</button>
+    <button class="arm-btn" data-cmd="A PICK_GRIP">GRIP</button>
+    <button class="arm-btn" data-cmd="A PICK_LIFT">LIFT</button>
+    <button class="arm-btn" data-cmd="A DROP_BASKET">DROP</button>
+    <button class="arm-btn" data-cmd="A DROP_RELEASE">REL</button>
+    <button class="arm-btn" data-cmd="A OPEN_GRIPPER">OPEN</button>
+    <button class="arm-btn" data-cmd="A CLOSE_GRIPPER">CLOSE</button>
+  </div>
+  <button id="console-toggle" class="mode-btn">CONSOLE</button>
+</div>
+
+<div id="arm-console" class="hidden">
+  <div id="console-log"></div>
+  <div id="console-input-row">
+    <input id="console-input" type="text" placeholder="Q | A HOME | J 90 70 120 110 90 40 1000 | V 0.3 0 ..." autocomplete="off" />
+    <select id="console-target">
+      <option value="arm">ARM</option>
+      <option value="base">BASE</option>
+    </select>
+    <button id="console-send" class="mode-btn">SEND</button>
+  </div>
+</div>
+
+<div id="skins-panel" class="hidden">
+  <div class="hud-label">OBJECT SKINS</div>
+  <div class="skin-row">
+    <select id="skin-class">
+      <option value="towel">towel</option>
+      <option value="bucket">bucket</option>
+      <option value="stool">stool</option>
+      <option value="bottle">bottle</option>
+    </select>
+    <input type="file" id="skin-input" accept="image/*" />
+  </div>
+  <div class="skin-row">
+    <button class="mode-btn" id="skin-reset-btn">RESET SKIN</button>
+    <label><input type="checkbox" id="skin-sync" checked /> sync AI profile</label>
+  </div>
+  <div id="skin-status"></div>
+</div>
+
+<div id="kb-help">WASD/arrows move | SPACE stop | T throw towel | 1-9 arm poses</div>
+
+</body>
+</html>

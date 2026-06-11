@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from onsen_robot_state.robot_state_aggregator_node import main
+main()

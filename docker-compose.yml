@@ -5,7 +5,6 @@ x-ros-env: &ros-env
   FASTDDS_BUILTIN_TRANSPORTS: UDPv4
   RCUTILS_LOGGING_BUFFERED_STREAM: "1"
   RCUTILS_COLORIZED_OUTPUT: "1"
-  SAVE_DATASET: ${SAVE_DATASET:-false}
   REALISM_PROFILE: ${REALISM_PROFILE:-low}
 
 x-ros-base: &ros-base
@@ -13,24 +12,25 @@ x-ros-base: &ros-base
   image: onsen-ros:latest
   network_mode: host
   restart: unless-stopped
+  volumes:
+    - ./shared:/ros2_ws/shared
 
 services:
-  dummy_robot:
+  # ── Firmware emulators (what runs on the real robot's MCUs) ──────────────
+  base_controller:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_dummy_robot base_controller_node
+
+  arm_controller:
     <<: *ros-base
     environment:
       <<: *ros-env
     volumes:
-      - ./dataset:/ros2_ws/dataset
+      - ./shared:/ros2_ws/shared
       - ./output:/ros2_ws/output
-    command: ros2 run onsen_dummy_robot dummy_stream_node
-    depends_on:
-      - control_arbitrator
-
-  camera_mux:
-    <<: *ros-base
-    environment:
-      <<: *ros-env
-    command: ros2 run onsen_dummy_robot camera_mux_node
+    command: ros2 run onsen_dummy_robot arm_controller_node
 
   control_arbitrator:
     <<: *ros-base
@@ -38,15 +38,54 @@ services:
       <<: *ros-env
     command: ros2 run onsen_dummy_robot control_arbitrator_node
 
+  # ── Robotics-engineer worker: safety + state fusion ──────────────────────
+  robot_state:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_robot_state robot_state_aggregator_node
+
+  # ── Headless sim source (fe = browser is ground truth) ───────────────────
+  dummy_robot:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+      SIM_SOURCE: ${SIM_SOURCE:-fe}
+      SAVE_DATASET: ${SAVE_DATASET:-false}
+    volumes:
+      - ./shared:/ros2_ws/shared
+      - ./dataset:/ros2_ws/dataset
+      - ./output:/ros2_ws/output
+    command: ros2 run onsen_dummy_robot dummy_stream_node
+    depends_on:
+      - control_arbitrator
+      - base_controller
+      - arm_controller
+
+  # ── AI worker (data-scientist surface) + autonomy loop ───────────────────
   ai_worker:
     <<: *ros-base
     environment:
       <<: *ros-env
       AI_CAMERA_INPUT: compressed
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
     command: ros2 run onsen_ai_worker ai_worker_node
-    depends_on:
-      - camera_mux
 
+  mission_executor:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    command: ros2 run onsen_ai_worker mission_executor_node
+    depends_on:
+      - control_arbitrator
+      - arm_controller
+
+  # ── Bridges ───────────────────────────────────────────────────────────────
   foxglove_bridge:
     <<: *ros-base
     environment:
@@ -66,11 +105,15 @@ services:
       port:=9090
     # ws://localhost:9090 on host directly via network_mode: host
     depends_on:
-      - dummy_robot
+      - base_controller
+      - arm_controller
+      - robot_state
 
+  # ── Frontend simulator (physics ground truth) ────────────────────────────
   frontend:
     build:
-      context: ./frontend
+      context: .
+      dockerfile: frontend/Dockerfile
     image: onsen-frontend:latest
     network_mode: host
     restart: unless-stopped
@@ -78,6 +121,7 @@ services:
       - rosbridge
     # http://localhost:8080 on host directly via network_mode: host
 
+  # ── Record / replay ───────────────────────────────────────────────────────
   rosbag_recorder:
     <<: *ros-base
     profiles: [record]
@@ -87,21 +131,36 @@ services:
       - ./bags:/bags
     command: >
       ros2 bag record
-      --output /bags/onsen_dummy_run
+      --output /bags/onsen_run
       --storage mcap
       --topics
-      /camera/front/image_raw
+      /scan
       /camera/front/image_raw/compressed
       /camera/front/camera_info
-      /scan
+      /camera/rear/image_raw/compressed
+      /camera/depth/image_raw
+      /camera/depth/camera_info
+      /sonar/range_0
+      /sonar/range_1
+      /sonar/range_2
+      /imu
       /odom
       /tf
-      /tf_static
       /joint_states
       /arm/state
+      /arm/command
+      /arm/response
+      /base/state
+      /base/wheel_targets
+      /robot/contacts
+      /robot/state
       /robot/events
+      /safety/stop
+      /ground_truth/pose
+      /ground_truth/objects
       /detected_objects
       /task_plan
+      /mission/state
 
   rosbag_player:
     <<: *ros-base
@@ -110,4 +169,19 @@ services:
       <<: *ros-env
     volumes:
       - ./bags:/bags
-    command: ros2 bag play /bags/onsen_dummy_run --loop
+    command: ros2 bag play /bags/onsen_run --loop
+
+  # ── Browser E2E (docker compose --profile e2e up) ─────────────────────────
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.49.0-noble
+    profiles: [e2e]
+    network_mode: host
+    working_dir: /e2e
+    volumes:
+      - ./frontend/e2e:/e2e
+    environment:
+      FE_URL: http://localhost:8080
+      ROSBRIDGE_URL: ws://localhost:9090
+    command: /bin/bash -c "npm install --no-audit --no-fund && npx playwright test --reporter=list"
+    depends_on:
+      - frontend
