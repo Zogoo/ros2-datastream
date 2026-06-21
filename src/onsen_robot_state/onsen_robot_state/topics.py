@@ -51,7 +51,17 @@ SAFETY_RESET = "/safety/reset"
 SAFETY_ENABLE = "/safety/enable"
 ROBOT_STATE = "/robot/state"
 
+# Navigation (onsen_nav: A* planner + pure-pursuit tracker + scan-matcher localizer)
+NAV_GOAL = "/nav/goal"
+NAV_STATUS = "/nav/status"
+NAV_CANCEL = "/nav/cancel"
+NAV_PATH = "/nav/path"
+MAP = "/map"
+SCAN_LOW = "/scan_low"
+LOC_POSE = "/localization/pose"
+
 # Perception / autonomy
 DETECTED_OBJECTS = "/detected_objects"
 TASK_PLAN = "/task_plan"
 MISSION_STATE = "/mission/state"
+TOWEL_TRACKS = "/perception/towel_tracks"

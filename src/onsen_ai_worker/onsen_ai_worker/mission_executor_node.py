@@ -1,27 +1,35 @@
 """Mission executor — closes the autonomy loop.
 
-Consumes perception + state, drives the robot through the arbitrated control
-path (/cmd_vel/auto, /arm/command) and reports /mission/state. Optional LLM
-target arbitration via llm_client (mock by default, OpenAI-compatible via env).
+Orchestrates the mission FSM (mission.py): perception + localized pose in,
+navigation goals + arm protocol sequences out. Locomotion between waypoints is
+delegated to the navigation server (/nav/goal, /nav/status); only fine
+alignment micro-twists go straight to /cmd_vel/auto. Optional LLM target
+arbitration via llm_client (mock by default, OpenAI-compatible via env).
 
-Sim note (documented trade-off): towel world coordinates come from
-/ground_truth/objects, while the camera detections gate target confirmation.
-Swapping to detection-only navigation is a documented exercise for AI
-engineers — the seam is MissionInput.towels.
+Autonomy is genuine: towel targets come from the perception tracker
+(/perception/towel_tracks), pose from the scan-matcher localizer
+(/localization/pose), and "holding" from the gripper payload event
+(/robot/events GRASP_*). Ground truth is NOT in the control path — set
+MISSION_USE_GT=true only for A/B comparison against /ground_truth/*.
 
 Topics in:
-  /ground_truth/objects  std_msgs/String   world-frame object states (FE)
-  /ground_truth/pose     geometry_msgs/PoseStamped  robot pose (FE)
-  /odom                  nav_msgs/Odometry fallback pose when GT is absent
-  /scan                  sensor_msgs/LaserScan  front-obstacle slowdown
-  /arm/state             std_msgs/String   firmware status gating sequences
-  /robot/control_mode    std_msgs/String   only acts in auto mode
-  /safety/stop           std_msgs/Bool     aborts to IDLE
-  /detected_objects      std_msgs/String   perception confirmation (optional gate)
+  /perception/towel_tracks std_msgs/String  map-frame towel targets
+  /localization/pose       PoseWithCovarianceStamped  localized robot pose
+  /odom                    nav_msgs/Odometry  degraded pose fallback
+  /nav/status              std_msgs/String  navigation goal status
+  /scan                    sensor_msgs/LaserScan  front-obstacle awareness
+  /arm/state               std_msgs/String  firmware status gating sequences
+  /robot/control_mode      std_msgs/String  only acts in auto mode
+  /robot/events            std_msgs/String  GRASP_ACQUIRED/RELEASED -> holding
+  /safety/stop             std_msgs/Bool    aborts to IDLE
+  /detected_objects        std_msgs/String  LLM context
+  (MISSION_USE_GT) /ground_truth/{objects,pose}  eval-only fallback
 
 Topics out:
-  /cmd_vel/auto  geometry_msgs/Twist
-  /arm/command   std_msgs/String
+  /nav/goal      std_msgs/String JSON   navigation goal (emit once per leg)
+  /nav/cancel    std_msgs/String JSON   cancel active goal
+  /cmd_vel/auto  geometry_msgs/Twist    fine alignment + search spin only
+  /arm/command   std_msgs/String        firmware protocol
   /mission/state std_msgs/String JSON
 """
 from __future__ import annotations
@@ -32,15 +40,18 @@ import os
 import time
 
 import rclpy
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 
+from onsen_robot_state import topics
+
+from .arm_kinematics import GRASP_Z, ArmModel, grasp_command, load_arm_model
 from .llm_client import complete_json, create_llm_client
-from .mission import MissionInput, MissionLogic
+from .mission import MissionInput, MissionLogic, world_to_robot
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -49,6 +60,7 @@ SENSOR_QOS = QoSProfile(
 )
 
 LAYOUT_PATH = os.environ.get("ONSEN_LAYOUT_PATH", "/ros2_ws/shared/onsen_layout.json")
+USE_GT = os.environ.get("MISSION_USE_GT", "false").lower() == "true"
 LLM_SYSTEM_PROMPT = (
     "You are the task arbiter for a towel-collecting onsen robot. "
     "Given detections JSON, reply with JSON: "
@@ -67,10 +79,21 @@ def _towel_bin_center() -> tuple[float, float]:
         return (0.0, 4.45)
 
 
+def _yaw_from_quat(q) -> float:
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
 class MissionExecutorNode(Node):
     def __init__(self) -> None:
         super().__init__("mission_executor_node")
-        self._logic = MissionLogic(bin_center=_towel_bin_center())
+        try:
+            self._arm: ArmModel | None = load_arm_model()
+            ik_reach = self._make_ik_reach(self._arm)
+        except (OSError, KeyError) as exc:
+            self.get_logger().warning(f"arm spec unavailable ({exc}) — canned pick poses")
+            self._arm = None
+            ik_reach = None
+        self._logic = MissionLogic(bin_center=_towel_bin_center(), ik_reach=ik_reach)
         self._llm = create_llm_client()
         self._llm_consult_interval = float(os.environ.get("MISSION_LLM_INTERVAL", "5.0"))
         self._last_llm_at = 0.0
@@ -78,75 +101,143 @@ class MissionExecutorNode(Node):
 
         self._pose: dict | None = None
         self._pose_source = "none"
+        self._loc_pose: dict | None = None
+        self._odom_pose: dict | None = None
         self._towels: list[dict] = []
         self._holding = False
         self._arm_status = "IDLE"
         self._mode = "auto"
         self._safety = False
-        self._min_front = None
+        self._nav_status = "idle"
+        self._min_front: float | None = None
         self._detections: list[dict] = []
+        self._last_sim_time: float | None = None
 
-        self._pub_twist = self.create_publisher(Twist, "/cmd_vel/auto", 10)
-        self._pub_arm = self.create_publisher(String, "/arm/command", 10)
-        self._pub_state = self.create_publisher(String, "/mission/state", 10)
+        self._pub_twist = self.create_publisher(Twist, topics.CMD_VEL_AUTO, 10)
+        self._pub_arm = self.create_publisher(String, topics.ARM_COMMAND, 10)
+        self._pub_state = self.create_publisher(String, topics.MISSION_STATE, 10)
+        self._pub_nav_goal = self.create_publisher(String, topics.NAV_GOAL, 10)
+        self._pub_nav_cancel = self.create_publisher(String, topics.NAV_CANCEL, 10)
 
-        self.create_subscription(String, "/ground_truth/objects", self._on_objects, 10)
-        self.create_subscription(PoseStamped, "/ground_truth/pose", self._on_gt_pose, 10)
-        self.create_subscription(Odometry, "/odom", self._on_odom, 10)
-        self.create_subscription(LaserScan, "/scan", self._on_scan, SENSOR_QOS)
-        self.create_subscription(String, "/arm/state", self._on_arm_state, 10)
-        self.create_subscription(String, "/robot/control_mode", self._on_mode, 10)
-        self.create_subscription(Bool, "/safety/stop", self._on_safety, 10)
-        self.create_subscription(String, "/detected_objects", self._on_detections, 10)
+        self.create_subscription(
+            PoseWithCovarianceStamped, topics.LOC_POSE, self._on_loc_pose, 10,
+        )
+        self.create_subscription(Odometry, topics.ODOM, self._on_odom, 10)
+        self.create_subscription(String, topics.NAV_STATUS, self._on_nav_status, 10)
+        self.create_subscription(LaserScan, topics.SCAN, self._on_scan, SENSOR_QOS)
+        self.create_subscription(String, topics.ARM_STATE, self._on_arm_state, 10)
+        self.create_subscription(String, topics.CONTROL_MODE, self._on_mode, 10)
+        self.create_subscription(Bool, topics.SAFETY_STOP, self._on_safety, 10)
+        self.create_subscription(String, topics.DETECTED_OBJECTS, self._on_detections, 10)
+        self.create_subscription(String, topics.SIM_STATUS, self._on_sim_status, 10)
+
+        if USE_GT:
+            self.create_subscription(String, topics.GROUND_TRUTH_OBJECTS, self._on_gt_objects, 10)
+            self.create_subscription(PoseStamped, topics.GROUND_TRUTH_POSE, self._on_gt_pose, 10)
+        else:
+            self.create_subscription(String, topics.TOWEL_TRACKS, self._on_tracks, 10)
+            self.create_subscription(String, topics.EVENTS, self._on_event, 20)
 
         self.create_timer(0.2, self._tick)
         self.get_logger().info(
-            f"MissionExecutor ready — bin at {self._logic.bin_center}, llm={self._llm.name}",
+            f"MissionExecutor ready — bin at {self._logic.bin_center}, "
+            f"llm={self._llm.name}, source={'GROUND_TRUTH' if USE_GT else 'perception'}",
         )
 
-    # ── Inputs ────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _make_ik_reach(arm: ArmModel):
+        """Analytic-IK reach line for a towel at base_link (rel_x, rel_y)."""
+        def reach(rel_x: float, rel_y: float) -> str | None:
+            # rel is already in base_link, the frame ArmModel.ik expects
+            target = (rel_x, rel_y, GRASP_Z)
+            sol = arm.ik(target)
+            if sol is None:
+                return None
+            sol[5] = 80.0  # gripper open for the scoop; PICK_GRIP closes it next
+            return grasp_command(sol, ms=900)
+        return reach
 
-    def _on_objects(self, msg: String) -> None:
+    # ── Pose ────────────────────────────────────────────────────────────────────
+
+    def _on_loc_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        if USE_GT:
+            return
+        self._loc_pose = {
+            "x": msg.pose.pose.position.x,
+            "y": msg.pose.pose.position.y,
+            "yaw": _yaw_from_quat(msg.pose.pose.orientation),
+        }
+
+    def _on_odom(self, msg: Odometry) -> None:
+        self._odom_pose = {
+            "x": msg.pose.pose.position.x,
+            "y": msg.pose.pose.position.y,
+            "yaw": _yaw_from_quat(msg.pose.pose.orientation),
+        }
+
+    def _on_gt_pose(self, msg: PoseStamped) -> None:
+        self._pose = {
+            "x": msg.pose.position.x,
+            "y": msg.pose.position.y,
+            "yaw": _yaw_from_quat(msg.pose.orientation),
+        }
+        self._pose_source = "ground_truth"
+
+    def _resolve_pose(self) -> None:
+        if USE_GT:
+            return  # set directly in _on_gt_pose
+        if self._loc_pose is not None:
+            self._pose = self._loc_pose
+            self._pose_source = "localization"
+        elif self._odom_pose is not None:
+            self._pose = self._odom_pose
+            self._pose_source = "odom"
+
+    # ── Targets ─────────────────────────────────────────────────────────────────
+
+    def _on_tracks(self, msg: String) -> None:
         try:
-            payload = json.loads(msg.data)
+            self._towels = json.loads(msg.data).get("tracks", [])
+        except json.JSONDecodeError:
+            pass
+
+    def _on_event(self, msg: String) -> None:
+        try:
+            event = json.loads(msg.data).get("event")
         except json.JSONDecodeError:
             return
-        objects = payload.get("objects", [])
+        if event == "GRASP_ACQUIRED":
+            self._holding = True
+        elif event in ("GRASP_RELEASED", "OBJECT_BINNED"):
+            self._holding = False
+
+    def _on_gt_objects(self, msg: String) -> None:
+        try:
+            objects = json.loads(msg.data).get("objects", [])
+        except json.JSONDecodeError:
+            return
         self._towels = [
             o for o in objects
             if o.get("class") == "towel" and not o.get("binned") and not o.get("held")
         ]
         self._holding = any(o.get("held") for o in objects)
 
-    def _on_gt_pose(self, msg: PoseStamped) -> None:
-        q = msg.pose.orientation
-        self._pose = {
-            "x": msg.pose.position.x,
-            "y": msg.pose.position.y,
-            "yaw": math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)),
-        }
-        self._pose_source = "ground_truth"
+    # ── Other inputs ────────────────────────────────────────────────────────────
 
-    def _on_odom(self, msg: Odometry) -> None:
-        if self._pose_source == "ground_truth":
-            return
-        q = msg.pose.pose.orientation
-        self._pose = {
-            "x": msg.pose.pose.position.x,
-            "y": msg.pose.pose.position.y,
-            "yaw": math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)),
-        }
-        self._pose_source = "odom"
+    def _on_nav_status(self, msg: String) -> None:
+        try:
+            self._nav_status = json.loads(msg.data).get("state", "idle")
+        except json.JSONDecodeError:
+            pass
 
     def _on_scan(self, msg: LaserScan) -> None:
         n = len(msg.ranges)
         if n == 0:
             return
-        # forward sector = beams around the middle of the (-pi..pi) sweep
         window = n // 8
         mid = n // 2
         sector = msg.ranges[mid - window: mid + window]
-        valid = [r for r in sector if msg.range_min < r < msg.range_max]
+        valid = [r for r in sector if r is not None and msg.range_min < r < msg.range_max]
         self._min_front = min(valid) if valid else None
 
     def _on_arm_state(self, msg: String) -> None:
@@ -170,9 +261,48 @@ class MissionExecutorNode(Node):
         except json.JSONDecodeError:
             pass
 
+    def _on_sim_status(self, msg: String) -> None:
+        """A drop in sim_time means the FE session restarted (browser reload);
+        clear stale FSM state so the robot doesn't resume a dead mission."""
+        try:
+            sim_time = float(json.loads(msg.data).get("sim_time", 0.0))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if self._last_sim_time is not None and sim_time < self._last_sim_time - 1.0:
+            self._logic.reset()
+            self._holding = False
+            self._towels = []
+            self._pub_nav_cancel.publish(String(data=json.dumps({})))
+            self.get_logger().info("Sim session restarted — mission state reset")
+        self._last_sim_time = sim_time
+
+    def _target_rel(self) -> tuple[float, float] | None:
+        """Freshest base_link (x, y) of the currently targeted towel, taken
+        straight from this tick's camera detections (depth-refined). Matched to
+        the target by proximity to where the map track projects into base_link.
+        Returns None when no fresh towel detection plausibly matches — the FSM
+        then falls back to the track-via-localized-pose estimate."""
+        target = self._logic.target
+        if target is None or self._pose is None:
+            return None
+        expected = world_to_robot(target["position"], self._pose)
+        best = None
+        best_d = 0.6   # m gate: a detection must be near the expected reach
+        for det in self._detections:
+            if det.get("class") != "towel":
+                continue
+            pos = det.get("position_refined") or det.get("estimated_position")
+            if pos is None:
+                continue
+            d = math.hypot(pos["x"] - expected[0], pos["y"] - expected[1])
+            if d < best_d:
+                best, best_d = (pos["x"], pos["y"]), d
+        return best
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
+        self._resolve_pose()
         if self._pose is None:
             return
         self._maybe_consult_llm()
@@ -184,9 +314,18 @@ class MissionExecutorNode(Node):
             arm_status=self._arm_status,
             safety_stop=self._safety,
             mode=self._mode,
+            nav_status=self._nav_status,
             min_front_obstacle=self._min_front,
+            target_rel=self._target_rel(),
         ))
 
+        if out.nav_cancel:
+            self._pub_nav_cancel.publish(String(data=json.dumps({})))
+        if out.nav_goal is not None:
+            self._pub_nav_goal.publish(String(data=json.dumps({
+                "goal_id": f"{out.state}_{int(time.time() * 1000)}",
+                "x": out.nav_goal[0], "y": out.nav_goal[1], "yaw": out.nav_goal[2],
+            })))
         if out.twist is not None:
             twist = Twist()
             twist.linear.x = float(out.twist[0])
@@ -202,6 +341,7 @@ class MissionExecutorNode(Node):
             "holding": self._holding,
             "towels_remaining": len(self._towels),
             "pose_source": self._pose_source,
+            "nav_status": self._nav_status,
             "llm": self._llm_verdict.get("action"),
             "llm_reason": self._llm_verdict.get("reason"),
         })))

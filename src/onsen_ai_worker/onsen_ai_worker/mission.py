@@ -1,40 +1,65 @@
 """Mission state machine — pure logic, no ROS imports.
 
-Closes the autonomy loop: SEARCH -> APPROACH -> PICK -> TO_BIN -> ALIGN_BIN ->
-DROP -> SEARCH. Navigation uses simple bearing-pursuit; pick/drop geometry is
-derived from the arm FK constants in shared/robot_spec.json (PICK_SCOOP
-fingertip ~0.67 m ahead of base center, DROP point over the left-side basket
-offset, reused to drop over map bins).
+Closes the autonomy loop: SEARCH -> APPROACH -> ALIGN_PICK -> PICK -> TO_BIN ->
+ALIGN_BIN -> DROP -> SEARCH. Locomotion between waypoints is delegated to the
+navigation server (A* + regulated pure pursuit) through a goal/status protocol
+mirroring Nav2 NavigateToPose: APPROACH/TO_BIN emit a single `nav_goal` and
+then wait on `nav_status`, commanding no twist while navigation owns the base.
+Only the fine ALIGN micro-motions are issued directly as twists. Pick/drop
+geometry derives from the arm FK constants in shared/robot_spec.json
+(PICK_SCOOP fingertip ~0.67 m ahead of base center).
 """
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+# (rel_x, rel_y in base_link) -> firmware "J ..." reach line, or None if the
+# measured towel is outside the arm's reachable annulus.
+IkReach = Callable[[float, float], "str | None"]
 
 SCOOP_FORWARD = 0.667     # m, fingertip ahead of base center at PICK_SCOOP
 DROP_OFFSET = (0.28, 0.66)  # m, release point in base_link at DROP_BIN (pan 178, extended)
 PICK_TOL_X = 0.08
 PICK_TOL_Y = 0.08
-ARRIVE_TOL = 0.10
 YAW_TOL = 0.08
+RETARGET_DIST = 0.4       # m a towel must drift before the nav goal is re-issued
+MAX_APPROACH_RETRIES = 3
+MAX_PICK_ATTEMPTS = 3     # failed grasps on one towel before it is parked
+PARK_TICKS = 150         # ~30 s at 5 Hz before a parked towel is retried
+GLOBAL_FAIL_LIMIT = 6    # consecutive failed picks (any/churning target) -> cooldown
+COOLDOWN_TICKS = 100     # ~20 s of patrol before the robot attempts picks again
 
+# Canned fallback (no IK): fixed scoop + grip pose, fixed 0.667 m ahead.
 PICK_SEQUENCE = [
     "A PRE_PICK", "A PICK_LOWER", "A PICK_SCOOP",
     "A PICK_GRIP", "A PICK_LIFT", "A PICK_RETRACT",
 ]
+# IK path: lift clear, reach the *measured* towel (J line), then close the
+# gripper IN PLACE (CLOSE_GRIPPER touches only J5 — a canned PICK_GRIP would
+# yank the arm back to a centred pose and miss an off-axis towel), then lift.
+PICK_PREAMBLE = ["A PRE_PICK"]
+PICK_GRASP = ["A CLOSE_GRIPPER", "A PICK_LIFT", "A PICK_RETRACT"]
 DROP_SEQUENCE = ["A DROP_BIN", "A DROP_BIN_RELEASE", "A HOME"]
 
 
 @dataclass
 class MissionInput:
-    pose: dict[str, float]                 # {x, y, yaw}
-    towels: list[dict[str, Any]]           # world-frame towels (not held/binned)
+    pose: dict[str, float]                 # {x, y, yaw} (map frame, localized)
+    towels: list[dict[str, Any]]           # world-frame towel tracks
     holding: bool
     arm_status: str                        # IDLE | MOVING | STOPPED
     safety_stop: bool
     mode: str                              # auto | manual
+    nav_status: str = "idle"               # idle|active|succeeded|failed|cancelled
     min_front_obstacle: float | None = None
+    # Freshest depth-refined base_link (x, y) of the targeted towel, measured
+    # directly from the camera this tick. Localization-independent, so the final
+    # grasp uses it in preference to the map-track-via-localized-pose estimate
+    # (the PBVS-lite "measure in the sensor frame for the final approach").
+    target_rel: tuple[float, float] | None = None
 
 
 @dataclass
@@ -42,6 +67,8 @@ class MissionOutput:
     state: str
     twist: tuple[float, float] | None = None   # (vx, wz); None = no command
     arm_command: str | None = None
+    nav_goal: tuple[float, float, float] | None = None   # (x, y, yaw), emit once
+    nav_cancel: bool = False
     target_id: str | None = None
     reason: str = ""
 
@@ -55,22 +82,40 @@ class _SeqState:
 
 
 class MissionLogic:
-    def __init__(self, bin_center: tuple[float, float]) -> None:
+    def __init__(
+        self,
+        bin_center: tuple[float, float],
+        ik_reach: IkReach | None = None,
+    ) -> None:
         self.bin_center = bin_center
+        # ik_reach(rel_x, rel_y) -> firmware "J ..." line reaching that base_link
+        # point at GRASP_Z, or None if unreachable. When unset, the canned
+        # PICK_SCOOP pose is used (fixed 0.667 m ahead).
+        self._ik_reach = ik_reach
         self.state = "IDLE"
         self.target: dict[str, Any] | None = None
         self._seq = _SeqState()
-        self._search_spin = 0.0
+        self._nav_goal: tuple[float, float, float] | None = None  # last goal emitted
+        self._retries = 0
+        self._was_active = False  # saw nav_status==active since the goal was emitted
+        # Per-target pick-attempt accounting: a towel that can't be grasped
+        # (mislocated, unreachable, occluded) is parked so the arm stops looping
+        # on it. Parked targets are retried after PARK_TICKS so a transient
+        # localization error doesn't abandon a real towel forever.
+        self._attempts: dict[str, int] = {}
+        self._parked: dict[str, int] = {}
+        self._consecutive_fails = 0   # failed picks in a row, across churning ids
+        self._cooldown = 0            # ticks remaining of the global pick cooldown
 
     def update(self, inp: MissionInput) -> MissionOutput:
         if inp.safety_stop:
-            return self._goto_state("IDLE", reason="safety stop latched")
+            return self._abort("safety stop latched")
         if inp.mode != "auto":
-            return self._goto_state("IDLE", reason="manual mode")
+            return self._abort("manual mode")
 
         handler = getattr(self, f"_state_{self.state.lower()}", None)
         if handler is None:
-            return self._goto_state("IDLE", reason=f"unknown state {self.state}")
+            return self._abort(f"unknown state {self.state}")
         return handler(inp)
 
     # ── States ────────────────────────────────────────────────────────────────
@@ -81,64 +126,114 @@ class MissionLogic:
 
     def _state_search(self, inp: MissionInput) -> MissionOutput:
         if inp.holding:
-            self.state = "TO_BIN"
+            self._enter("TO_BIN")
             return MissionOutput(state="SEARCH", reason="already holding — deliver")
-        if inp.towels:
-            self.target = nearest(inp.towels, inp.pose)
-            self.state = "APPROACH"
+        self._age_parked()
+        if self._cooldown > 0:
+            self._cooldown -= 1
+            return MissionOutput(
+                state="SEARCH", twist=(0.0, 0.45),
+                reason=f"pick cooldown ({self._cooldown} ticks) — phantom/unreachable churn",
+            )
+        candidates = [t for t in inp.towels if t["id"] not in self._parked]
+        if candidates:
+            self.target = nearest(candidates, inp.pose)
+            self._retries = 0
+            self._enter("APPROACH")
             return MissionOutput(
                 state="SEARCH", target_id=self.target["id"],
                 reason=f"towel {self.target['id']} selected",
             )
-        self._search_spin += 1
-        return MissionOutput(state="SEARCH", twist=(0.0, 0.45), reason="scanning for towels")
+        # nothing graspable right now (none seen, or all parked) — scan in place
+        reason = "all towels parked — waiting" if inp.towels else "scanning for towels"
+        return MissionOutput(state="SEARCH", twist=(0.0, 0.45), reason=reason)
 
     def _state_approach(self, inp: MissionInput) -> MissionOutput:
         towel = self._refresh_target(inp)
         if towel is None:
-            self.state = "SEARCH"
-            return MissionOutput(state="APPROACH", reason="target lost")
+            self._enter("SEARCH")
+            return MissionOutput(state="APPROACH", nav_cancel=True, reason="target lost")
+
         rel = world_to_robot(towel["position"], inp.pose)
         if abs(rel[0] - SCOOP_FORWARD) < PICK_TOL_X and abs(rel[1]) < PICK_TOL_Y:
-            self.state = "PICK"
-            self._seq = _SeqState(commands=list(PICK_SEQUENCE))
-            return MissionOutput(state="APPROACH", twist=(0.0, 0.0), reason="in pick window")
+            self._enter("ALIGN_PICK")
+            return MissionOutput(state="APPROACH", nav_cancel=True, reason="at pick standoff")
 
-    # navigate toward the stand-off point that places the towel in the pick window
-        goal = standoff_point(
-            (towel["position"]["x"], towel["position"]["y"]),
-            (inp.pose["x"], inp.pose["y"]),
-            SCOOP_FORWARD,
-        )
-        twist = pursue(inp.pose, goal, inp.min_front_obstacle)
-        return MissionOutput(
-            state="APPROACH", twist=twist, target_id=towel["id"],
-            reason=f"driving to towel (rel x={rel[0]:.2f} y={rel[1]:.2f})",
-        )
+        goal = self._standoff_goal(towel["position"], inp.pose)
+        out = self._navigate(inp, goal, "APPROACH", target_id=towel["id"])
+        if out is not None:
+            return out
+        # navigation finished but we're not in the pick window — refine on foot
+        self._enter("ALIGN_PICK")
+        return MissionOutput(state="APPROACH", reason="nav done — fine align")
+
+    def _state_align_pick(self, inp: MissionInput) -> MissionOutput:
+        towel = self._refresh_target(inp)
+        if towel is None:
+            self._enter("SEARCH")
+            return MissionOutput(state="ALIGN_PICK", reason="target lost")
+        # Prefer the direct camera measurement of the towel in base_link (immune
+        # to localization drift) for the final alignment + reach; fall back to
+        # the map track converted through the localized pose only when no fresh
+        # detection of the target is available this tick.
+        rel = inp.target_rel or world_to_robot(towel["position"], inp.pose)
+        if abs(rel[0] - SCOOP_FORWARD) < PICK_TOL_X and abs(rel[1]) < PICK_TOL_Y:
+            self.state = "PICK"
+            self._seq = _SeqState(commands=self._build_pick_sequence(rel))
+            return MissionOutput(state="ALIGN_PICK", twist=(0.0, 0.0), reason="in pick window")
+        # bearing first, then close the longitudinal gap — gentle, low speed
+        bearing = wrap_angle(math.atan2(rel[1], rel[0]))
+        if abs(bearing) > 0.12:
+            wz = max(-0.5, min(0.5, 1.5 * bearing))
+            return MissionOutput(state="ALIGN_PICK", twist=(0.0, wz), reason="aligning bearing")
+        vx = max(-0.08, min(0.10, 0.4 * (rel[0] - SCOOP_FORWARD)))
+        return MissionOutput(state="ALIGN_PICK", twist=(vx, 0.0),
+                             reason=f"closing gap rel_x={rel[0]:.2f}")
 
     def _state_pick(self, inp: MissionInput) -> MissionOutput:
         out = self._run_sequence(inp, "PICK")
         if out is not None:
             return out
-        self.state = "TO_BIN" if inp.holding else "SEARCH"
-        reason = "towel grasped — delivering" if inp.holding else "grasp failed — retry"
-        return MissionOutput(state="PICK", reason=reason)
+        tid = self.target["id"] if self.target else None
+        if inp.holding:
+            if tid:
+                self._attempts.pop(tid, None)
+            self._consecutive_fails = 0
+            self._enter("TO_BIN")
+            return MissionOutput(state="PICK", reason="towel grasped — delivering")
+        # grasp failed. Two guards stop the arm looping forever:
+        #  - per-target: park a specific towel after MAX_PICK_ATTEMPTS fails
+        #  - global: after GLOBAL_FAIL_LIMIT fails in a row (even across churning
+        #    phantom ids that defeat the per-target counter) enter a patrol
+        #    cooldown so the robot stops hammering and lets perception settle.
+        self._consecutive_fails += 1
+        if self._consecutive_fails >= GLOBAL_FAIL_LIMIT:
+            self._cooldown = COOLDOWN_TICKS
+            self._consecutive_fails = 0
+            self._enter("SEARCH")
+            return MissionOutput(state="PICK", reason="too many failed picks — cooldown")
+        if tid:
+            self._attempts[tid] = self._attempts.get(tid, 0) + 1
+            if self._attempts[tid] >= MAX_PICK_ATTEMPTS:
+                self._parked[tid] = PARK_TICKS
+                self._attempts.pop(tid, None)
+                self._enter("SEARCH")
+                return MissionOutput(state="PICK", reason=f"{tid} unreachable — parked")
+        self._enter("SEARCH")
+        return MissionOutput(state="PICK", reason="grasp failed — retry")
 
     def _state_to_bin(self, inp: MissionInput) -> MissionOutput:
         if not inp.holding:
-            self.state = "SEARCH"
-            return MissionOutput(state="TO_BIN", reason="payload lost")
-        pos = (inp.pose["x"], inp.pose["y"])
+            self._enter("SEARCH")
+            return MissionOutput(state="TO_BIN", nav_cancel=True, reason="payload lost")
         standoff = math.hypot(*DROP_OFFSET)
-        goal = standoff_point(self.bin_center, pos, standoff)
-        dist = math.hypot(goal[0] - pos[0], goal[1] - pos[1])
-        if dist < ARRIVE_TOL:
-            self.state = "ALIGN_BIN"
-            return MissionOutput(state="TO_BIN", twist=(0.0, 0.0), reason="at bin standoff")
-        return MissionOutput(
-            state="TO_BIN", twist=pursue(inp.pose, goal, inp.min_front_obstacle),
-            reason=f"driving to bin ({dist:.2f} m)",
-        )
+        gx, gy = standoff_point(self.bin_center, (inp.pose["x"], inp.pose["y"]), standoff)
+        bin_yaw = math.atan2(self.bin_center[1] - gy, self.bin_center[0] - gx)
+        out = self._navigate(inp, (gx, gy, bin_yaw), "TO_BIN")
+        if out is not None:
+            return out
+        self._enter("ALIGN_BIN")
+        return MissionOutput(state="TO_BIN", reason="at bin standoff")
 
     def _state_align_bin(self, inp: MissionInput) -> MissionOutput:
         v = (self.bin_center[0] - inp.pose["x"], self.bin_center[1] - inp.pose["y"])
@@ -156,8 +251,64 @@ class MissionLogic:
         out = self._run_sequence(inp, "DROP")
         if out is not None:
             return out
-        self.state = "SEARCH"
+        self._enter("SEARCH")
         return MissionOutput(state="DROP", reason="drop complete — searching")
+
+    # ── Navigation protocol ─────────────────────────────────────────────────────
+
+    def _navigate(
+        self, inp: MissionInput, goal: tuple[float, float, float],
+        label: str, target_id: str | None = None,
+    ) -> MissionOutput | None:
+        """Drives to `goal` via the nav server. Returns a MissionOutput while
+        navigation is in progress, or None once the goal succeeded (the caller
+        advances the FSM). Re-issues the goal if the target drifts far."""
+        if self._nav_goal is None or self._goal_moved(goal):
+            self._nav_goal = goal
+            self._was_active = False
+            return MissionOutput(
+                state=label, nav_goal=goal, target_id=target_id,
+                reason=f"nav goal ({goal[0]:.2f}, {goal[1]:.2f})",
+            )
+        if inp.nav_status == "active":
+            self._was_active = True
+        if inp.nav_status == "succeeded":
+            self._nav_goal = None
+            return None
+        if inp.nav_status in ("failed", "cancelled") and self._was_active:
+            self._retries += 1
+            self._nav_goal = None
+            if self._retries > MAX_APPROACH_RETRIES:
+                self._enter("SEARCH")
+                return MissionOutput(state=label, reason="nav failed — giving up target")
+            return MissionOutput(
+                state=label, reason=f"nav {inp.nav_status} — retry {self._retries}",
+            )
+        return MissionOutput(state=label, target_id=target_id, reason="navigating")
+
+    def _goal_moved(self, goal: tuple[float, float, float]) -> bool:
+        if self._nav_goal is None:
+            return True
+        return math.hypot(goal[0] - self._nav_goal[0], goal[1] - self._nav_goal[1]) > RETARGET_DIST
+
+    def _standoff_goal(
+        self, towel: dict[str, float], pose: dict[str, float],
+    ) -> tuple[float, float, float]:
+        gx, gy = standoff_point(
+            (towel["x"], towel["y"]), (pose["x"], pose["y"]), SCOOP_FORWARD,
+        )
+        yaw = math.atan2(towel["y"] - gy, towel["x"] - gx)
+        return (gx, gy, yaw)
+
+    def _build_pick_sequence(self, rel: tuple[float, float]) -> list[str]:
+        """Replace the fixed PICK_SCOOP with an IK reach to the measured towel
+        (base_link rel position) when a solver is available — this is what lets
+        the arm grasp an off-centre towel instead of a canned spot."""
+        if self._ik_reach is not None:
+            reach = self._ik_reach(rel[0], rel[1])
+            if reach is not None:
+                return [*PICK_PREAMBLE, reach, *PICK_GRASP]
+        return list(PICK_SEQUENCE)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -194,11 +345,39 @@ class MissionLogic:
                 return towel
         return None
 
-    def _goto_state(self, state: str, reason: str) -> MissionOutput:
-        if self.state != state:
-            self.state = state
-            self._seq = _SeqState()
-        return MissionOutput(state=state, twist=None, reason=reason)
+    def _age_parked(self) -> None:
+        """Tick down parked towels; a target whose timer expires is retried."""
+        self._parked = {
+            tid: ticks - 1 for tid, ticks in self._parked.items() if ticks - 1 > 0
+        }
+
+    def reset(self) -> None:
+        """Clear all FSM state — called when the simulator session restarts
+        (a browser reload) so stale targets/sequences don't carry across."""
+        self.state = "IDLE"
+        self.target = None
+        self._seq = _SeqState()
+        self._nav_goal = None
+        self._was_active = False
+        self._retries = 0
+        self._attempts.clear()
+        self._parked.clear()
+        self._consecutive_fails = 0
+        self._cooldown = 0
+
+    def _enter(self, state: str) -> None:
+        """Transition to a new state, clearing any in-flight nav goal/sequence."""
+        self.state = state
+        self._seq = _SeqState()
+        self._nav_goal = None
+        self._was_active = False
+
+    def _abort(self, reason: str) -> MissionOutput:
+        """Safety/manual preempt: cancel any active nav goal and idle."""
+        had_goal = self._nav_goal is not None
+        if self.state != "IDLE":
+            self._enter("IDLE")
+        return MissionOutput(state="IDLE", twist=None, nav_cancel=had_goal, reason=reason)
 
 
 def nearest(towels: list[dict[str, Any]], pose: dict[str, float]) -> dict[str, Any]:
@@ -221,22 +400,6 @@ def standoff_point(
     dy = target[1] - robot[1]
     d = math.hypot(dx, dy) or 1e-6
     return (target[0] - dx / d * distance, target[1] - dy / d * distance)
-
-
-def pursue(
-    pose: dict[str, float], goal: tuple[float, float],
-    min_front_obstacle: float | None,
-) -> tuple[float, float]:
-    dx = goal[0] - pose["x"]
-    dy = goal[1] - pose["y"]
-    dist = math.hypot(dx, dy)
-    err = wrap_angle(math.atan2(dy, dx) - pose["yaw"])
-    if abs(err) > 0.35:
-        return (0.0, max(-0.9, min(0.9, 2.0 * err)))
-    vx = max(0.06, min(0.30, 0.6 * dist))
-    if min_front_obstacle is not None and min_front_obstacle < 0.45:
-        vx = min(vx, 0.08)
-    return (vx, max(-0.8, min(0.8, 1.4 * err)))
 
 
 def wrap_angle(a: float) -> float:

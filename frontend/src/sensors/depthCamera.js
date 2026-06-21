@@ -52,15 +52,16 @@ export class DepthCamera {
     const { width, height, range_min: rmin, range_max: rmax, noise_coeff: nc } = this.spec;
     const src = this.pixels;
     const out = this.depthMm;
-    const UnpackFactors = [1 / (256 ** 3), 1 / (256 ** 2), 1 / 256, 1];
 
     for (let y = 0; y < height; y++) {
       const srcRow = (height - 1 - y) * width * 4;
       const outRow = y * width * 2;
       for (let x = 0; x < width; x++) {
         const i = srcRow + x * 4;
-        const packed = (src[i] * UnpackFactors[3] + src[i + 1] * UnpackFactors[2]
-          + src[i + 2] * UnpackFactors[1] + src[i + 3] * UnpackFactors[0]) / 256;
+        // three.js RGBADepthPacking: ALPHA carries the most significant bits
+        // (packDepthToRGBA -> vec4(fract(v*PackFactors), v)), red the finest.
+        const packed = (src[i + 3] + src[i + 2] / 256
+          + src[i + 1] / (256 ** 2) + src[i] / (256 ** 3)) / 256;
         // packed is the perspective (non-linear) depth; linearize to view-space meters.
         const viewZ = packed >= 1.0 ? Infinity
           : (this.near * this.far) / (this.far - packed * (this.far - this.near));

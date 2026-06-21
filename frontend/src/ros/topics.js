@@ -37,4 +37,11 @@ export const TOPICS = {
   detectedObjects: { name: '/detected_objects', type: 'std_msgs/String' },
   taskPlan: { name: '/task_plan', type: 'std_msgs/String' },
   missionState: { name: '/mission/state', type: 'std_msgs/String' },
+
+  // Navigation / perception (onsen_nav + ai_worker)
+  navGoal: { name: '/nav/goal', type: 'std_msgs/String' },
+  navStatus: { name: '/nav/status', type: 'std_msgs/String' },
+  navPath: { name: '/nav/path', type: 'nav_msgs/Path' },
+  locPose: { name: '/localization/pose', type: 'geometry_msgs/PoseWithCovarianceStamped' },
+  towelTracks: { name: '/perception/towel_tracks', type: 'std_msgs/String' },
 };

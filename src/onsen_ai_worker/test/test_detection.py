@@ -20,8 +20,9 @@ def isolated_profile_store(tmp_path, monkeypatch):
 def sim_frame(towel_bgr, box=(200, 260, 340, 350)):
     """Dark wooden floor + one towel, like a front-camera frame."""
     img = np.zeros((480, 640, 3), np.uint8)
+    # floor saturation matches the live render (S ~= 215): deep warm wood
     for y in range(480):
-        img[y, :] = (50 + y // 24, 75 + y // 20, 110 + y // 16)
+        img[y, :] = (18 + y // 30, 52 + y // 24, 108 + y // 16)
     rng = np.random.default_rng(7)
     img = (img + rng.normal(0, 5, img.shape)).clip(0, 255).astype(np.uint8)
     x1, y1, x2, y2 = box

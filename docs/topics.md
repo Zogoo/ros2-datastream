@@ -62,17 +62,52 @@ Names live in exactly two mirrored registries:
 | `/safety/reset` | in | `std_msgs/Bool` operator reset (refused while hazard active) |
 | `/safety/enable` | in | `std_msgs/Bool` arm/disarm the e-stop latch (FE `E-STOP` toggle; default disarmed, `SAFETY_ENABLED=true` to arm at boot); disarming clears latches |
 | `/robot/state` | out 5 Hz | fused JSON: `{safety_enabled, safety_stop, safety_critical, tilt_deg, min_obstacle_m, arm_scan_filter, odom, arm, base, last_contact}` |
-| `/robot/events` | out | safety + sim events (`SAFETY_IMPACT`, `OBJECT_BINNED`, `TOWEL_THROWN`, …) |
+| `/robot/events` | out | safety + sim events (`SAFETY_IMPACT`, `OBJECT_BINNED`, `TOWEL_THROWN`, `GRASP_ACQUIRED`, `GRASP_RELEASED`, …) |
 
-## Perception + autonomy (`ai_worker`, `mission_executor`)
+`GRASP_ACQUIRED`/`GRASP_RELEASED` are emitted by the FE gripper (payload-sensor
+emulation) when the grasp joint forms/breaks — the mission's `holding` signal,
+not ground truth.
+
+## Navigation (`onsen_nav`: static TF, localizer, depth-scan, nav server)
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `/tf_static` | out once | base_link -> laser/cameras/imu/sonar/arm_base, from robot_spec |
+| `/scan_low` | out ~5 Hz | `sensor_msgs/LaserScan` low-obstacle layer from the depth camera (bath rims/stools/towels below the lidar plane), base_link frame |
+| `/localization/pose` | out 20 Hz | `PoseWithCovarianceStamped` AMCL-style; `covariance[0]` = scan-match score; publishes `map->odom` TF |
+| `/map` | out latched | `nav_msgs/OccupancyGrid` rasterized from the layout (walls + furniture + pool keepout) |
+| `/nav/goal` | in | JSON `{goal_id, x, y, yaw?}` — NavigateToPose-equivalent |
+| `/nav/cancel` | in | JSON `{}` cancels the active goal |
+| `/nav/status` | out 5 Hz | JSON `{goal_id, state, distance_remaining}`; state `idle|active|succeeded|failed|cancelled` |
+| `/nav/path` | out | `nav_msgs/Path` the A* + shortcut waypoint polyline (map frame) |
+
+The nav server drives `/cmd_vel/auto` (the arbitrator still owns `/cmd_vel`;
+manual wins). See `docs/research_notes.md` for why this is in-house A* +
+regulated pure pursuit + likelihood-field matching rather than Nav2 (not
+packaged for this distro) — same published methods, seam-compatible interface.
+
+## Arm description (`onsen_arm`)
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `/robot_description` | out latched | URDF generated from robot_spec (move_group would consume it; here it feeds robot_state_publisher) |
+| `/joint_states_urdf` | out 20 Hz | FE servo-offset joints re-published with the 1.5 coupling applied, for robot_state_publisher's arm TF |
+
+## Perception + autonomy (`ai_worker`, `towel_tracker`, `mission_executor`)
 
 | Topic | Producer | Payload |
 |---|---|---|
-| `/detected_objects` | ai_worker | `{timestamp, frame_id, objects[{id, class, confidence, bbox, robot_class, pickable, risk, estimated_position}]}` |
+| `/detected_objects` | ai_worker | `{…, objects[{…, estimated_position, position_refined, range, source: "depth"\|"ground_plane", estimated_height}]}` (depth-refined range + height gate) |
 | `/task_plan` | ai_worker | `{task, next_action, target_object_id, reason}` |
-| `/mission/state` | mission_executor | `{state, reason, target_id, holding, towels_remaining, pose_source, llm, llm_reason}` |
+| `/perception/towel_tracks` | towel_tracker | `{tracks[{id, class, position{x,y,z}, hits, source, range}]}` map-frame depth-confirmed towel tracks |
+| `/mission/state` | mission_executor | `{state, reason, target_id, holding, towels_remaining, pose_source, nav_status, llm, llm_reason}` |
+| `/eval/metrics` | eval (profile `eval`) | `{loc_pos_err_m, loc_yaw_err_deg, track_mean_err_m, …}` — the only ground-truth consumer |
 
-Mission states: `IDLE -> SEARCH -> APPROACH -> PICK -> TO_BIN -> ALIGN_BIN -> DROP -> SEARCH`.
+Mission states: `IDLE -> SEARCH -> APPROACH -> ALIGN_PICK -> PICK -> TO_BIN -> ALIGN_BIN -> DROP -> SEARCH`.
+APPROACH/TO_BIN delegate locomotion to `/nav/goal`; PICK reaches the *measured*
+towel pose via analytic IK (`J` command), not a canned pose. Targets come from
+`/perception/towel_tracks` and pose from `/localization/pose` — ground truth is
+eval-only (`MISSION_USE_GT=true` restores the GT path for A/B comparison).
 
 ## HTTP API (ai_worker :5000, proxied at FE `/api/`)
 

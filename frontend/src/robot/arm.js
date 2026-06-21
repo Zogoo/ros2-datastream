@@ -6,6 +6,10 @@ const GRAVITY = 9.81;
 
 const HOME = [90, 90, 90, 90, 90, 70];
 
+/** Grasp events queue — drained by main.js onto /robot/events. Emulates a
+ *  gripper payload/force sensor: a sensor signal, not ground truth. */
+export const graspEvents = [];
+
 /** 6-axis arm: servo lag toward firmware joint targets, FK-driven visuals,
  *  kinematic colliders for forearm/gripper, and geometric grasping. */
 export class Arm {
@@ -152,6 +156,7 @@ export class Arm {
     item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff & ~(GROUP_ARM | GROUP_ROBOT)));
     item.held = true;
     this.heldItem = item;
+    graspEvents.push({ event: 'GRASP_ACQUIRED', object_id: item.id, object_class: item.cls });
   }
 
   _release() {
@@ -164,6 +169,7 @@ export class Arm {
     item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff));
     item.held = false;
     item.body.setLinvel(this.fingertipVel, true);
+    graspEvents.push({ event: 'GRASP_RELEASED', object_id: item.id, object_class: item.cls });
   }
 
   /** The kinematic gripper body absorbs joint forces, so push the carried

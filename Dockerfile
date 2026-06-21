@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y \
     ros-lyrical-rosbag2-transport \
     ros-lyrical-tf2-ros \
     ros-lyrical-tf2-tools \
+    ros-lyrical-robot-state-publisher \
+    ros-lyrical-launch-xml \
     && rm -rf /var/lib/apt/lists/*
 
 # Quality-gate tooling (make check runs these inside this image)
@@ -34,7 +36,7 @@ COPY shared/ /ros2_ws/shared/
 # Build workspace
 RUN /bin/bash -c "source /opt/ros/lyrical/setup.bash && \
     colcon build --symlink-install \
-    --packages-select onsen_dummy_robot onsen_ai_worker onsen_robot_state"
+    --packages-select onsen_dummy_robot onsen_ai_worker onsen_robot_state onsen_nav onsen_arm"
 
 # Entrypoint
 COPY entrypoint.sh /entrypoint.sh

@@ -10,6 +10,7 @@ import { OnsenWorld } from './env/layout.js';
 import { ObjectManager } from './env/objects.js';
 import { Steam } from './env/steam.js';
 import { Robot, yawQuat } from './robot/robot.js';
+import { graspEvents } from './robot/arm.js';
 import { LidarSensor } from './sensors/lidar.js';
 import { RgbCamera } from './sensors/rgbCamera.js';
 import { DepthCamera } from './sensors/depthCamera.js';
@@ -42,10 +43,12 @@ async function boot() {
   scene.background = new THREE.Color(0x14161a);
   scene.fog = new THREE.Fog(0x14161a, 14, 30);
 
-  const hemi = new THREE.HemisphereLight(0xfff4e0, 0x33302a, 0.85);
+  // bright enough that the HSV detector keeps color separation (towels stay
+  // low-saturation); onsen interiors are well-lit in reality
+  const hemi = new THREE.HemisphereLight(0xfff4e0, 0x4a463e, 1.6);
   hemi.position.set(0, 0, 1);
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffe8c0, 1.4);
+  const sun = new THREE.DirectionalLight(0xffe8c0, 1.9);
   sun.position.set(6, -4, 9);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -144,6 +147,13 @@ async function boot() {
     groundTruth.update(renderDt, fps);
     controls.update(renderDt);
 
+    while (graspEvents.length) {
+      const event = graspEvents.shift();
+      ros.publish(TOPICS.events, {
+        data: JSON.stringify({ ...event, timestamp: new Date().toISOString() }),
+      });
+      hud.ticker(`${event.event} ${event.object_id}`);
+    }
     for (const event of objects.drainBinnedEvents()) {
       ros.publish(TOPICS.events, {
         data: JSON.stringify({ ...event, timestamp: new Date().toISOString() }),
@@ -166,6 +176,7 @@ async function boot() {
       robot.body.setRotation(yawQuat(yaw), true);
       robot.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       robot.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      odom.reset(x, y, yaw);  // keep odometry consistent with the teleport
     },
     setVelocity(vx, vy) {
       robot.body.setLinvel({ x: vx, y: vy, z: 0 }, true);
@@ -181,6 +192,22 @@ async function boot() {
       return { x: p.x, y: p.y, z: p.z, held: item.held, binned: item.binned };
     },
     holding: () => robot.arm.holding(),
+    depthStats: () => {
+      const px = camDepth.pixels;
+      const mm = camDepth.depthMm;
+      let rawNonBg = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        if (px[i] !== px[4] || px[i + 1] !== px[5] || px[i + 2] !== px[6]) rawNonBg++;
+      }
+      let mmNonZero = 0;
+      let mmMax = 0;
+      for (let i = 0; i < mm.length; i += 2) {
+        const v = mm[i] | (mm[i + 1] << 8);
+        if (v > 0) mmNonZero++;
+        if (v > mmMax) mmMax = v;
+      }
+      return { rawSample: Array.from(px.slice(0, 16)), rawNonBg, mmNonZero, mmMax };
+    },
     safetyStop: () => robot.safetyStop,
     fps: () => fps,
     world,
