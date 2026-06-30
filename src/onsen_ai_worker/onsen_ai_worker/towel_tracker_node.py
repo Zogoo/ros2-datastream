@@ -17,6 +17,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 from onsen_robot_state import topics
+from onsen_robot_state.session import SessionWatch
 
 from .towel_tracker import TowelTracker
 
@@ -26,7 +27,7 @@ class TowelTrackerNode(Node):
         super().__init__("towel_tracker_node")
         self._tracker = TowelTracker()
         self._pose: tuple[float, float, float] | None = None
-        self._last_sim_time: float | None = None
+        self._session = SessionWatch()
 
         self._pub = self.create_publisher(String, topics.TOWEL_TRACKS, 10)
         self.create_subscription(String, topics.DETECTED_OBJECTS, self._on_detections, 10)
@@ -38,15 +39,11 @@ class TowelTrackerNode(Node):
         self.get_logger().info("TowelTracker ready — map-frame tracks from detections")
 
     def _on_sim_status(self, msg: String) -> None:
-        """Clear all tracks when the FE session restarts (sim_time regression)."""
-        try:
-            sim_time = float(json.loads(msg.data).get("sim_time", 0.0))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return
-        if self._last_sim_time is not None and sim_time < self._last_sim_time - 1.0:
+        """Clear all tracks when the FE session restarts (new session_id).
+        SessionWatch ignores competing concurrent tabs, avoiding a clear storm."""
+        if self._session.update_raw(msg.data, time.monotonic()):
             self._tracker = TowelTracker()
             self.get_logger().info("Sim session restarted — towel tracks cleared")
-        self._last_sim_time = sim_time
 
     def _on_pose(self, msg: PoseWithCovarianceStamped) -> None:
         q = msg.pose.pose.orientation

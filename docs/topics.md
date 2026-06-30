@@ -24,7 +24,8 @@ Names live in exactly two mirrored registries:
 | `/robot/contacts` | `std_msgs/String` JSON | event | `{part, impulse, normal, object_id, object_class, critical}` |
 | `/ground_truth/pose` | `geometry_msgs/PoseStamped` | 10 Hz | for drift quantification |
 | `/ground_truth/objects` | `std_msgs/String` JSON | 5 Hz | true object states for labeling/eval |
-| `/sim/status` | `std_msgs/String` JSON | 1 Hz | `{alive, sim_time, fps}` heartbeat (detects throttled tabs) |
+| `/sim/status` | `std_msgs/String` JSON | 1 Hz | `{alive, session_id, sim_time, fps}` heartbeat; `session_id` change = FE restart (see SessionWatch) |
+| `/robot/held_object` | `std_msgs/String` JSON | on change | `{held, object_id, object_class, position}` — gripper payload sensor |
 
 ## Control
 

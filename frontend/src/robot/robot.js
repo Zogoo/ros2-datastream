@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { WheelSuspension, rotateQuat } from '../physics/vehicle.js';
-import { GROUP_ROBOT, GROUP_WORLD, groups } from '../physics/world.js';
+import { GROUP_OBJECT, GROUP_ROBOT, GROUP_WORLD, groups } from '../physics/world.js';
 import { Arm } from './arm.js';
 
 export const BASE_Z = 0.13; // body origin height above ground at suspension rest
@@ -34,7 +34,7 @@ export class Robot {
     const tub = physics.R.ColliderDesc.cuboid(c.size[0] / 2, c.size[1] / 2, c.size[2] / 2)
       .setMass(c.mass)
       .setFriction(0.15)
-      .setCollisionGroups(groups(GROUP_ROBOT, GROUP_WORLD))
+      .setCollisionGroups(groups(GROUP_ROBOT, GROUP_WORLD | GROUP_OBJECT))
       .setActiveEvents(physics.R.ActiveEvents.COLLISION_EVENTS | physics.R.ActiveEvents.CONTACT_FORCE_EVENTS)
       .setContactForceEventThreshold(1.0);
     this.tubCollider = physics.world.createCollider(tub, this.body);
@@ -69,7 +69,7 @@ export class Robot {
       const desc = this.physics.R.ColliderDesc.cuboid(size[0] / 2, size[1] / 2, size[2] / 2)
         .setTranslation(pos[0], pos[1], pos[2])
         .setMass(0.15)
-        .setCollisionGroups(groups(GROUP_ROBOT, GROUP_WORLD));
+        .setCollisionGroups(groups(GROUP_ROBOT, GROUP_WORLD | GROUP_OBJECT));
       const col = this.physics.world.createCollider(desc, this.body);
       this.physics.registerMeta(col, { kind: 'robot', part: 'basket' });
     }

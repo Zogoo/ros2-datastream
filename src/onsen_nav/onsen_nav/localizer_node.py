@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 
 import numpy as np
 import rclpy
@@ -27,6 +28,7 @@ from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
 from onsen_robot_state import topics
+from onsen_robot_state.session import SessionWatch
 
 from .grid import NavGrid
 from .scan_matcher import LikelihoodField, match, valid_beams
@@ -96,25 +98,21 @@ class LocalizerNode(Node):
         self.create_subscription(String, topics.ARM_STATE, self._on_arm_state, 10)
         self.create_subscription(String, topics.SIM_STATUS, self._on_sim_status, 10)
 
-        self._last_sim_time: float | None = None
+        self._session = SessionWatch()
         self.create_timer(1.0 / MATCH_HZ, self._match_tick)
         self.create_timer(0.05, self._broadcast)
         mode = "GT-assisted (reliable)" if GT_LOCALIZATION else "scan-matching (autonomous)"
         self.get_logger().info(f"Localizer ready — {mode} at 2 Hz")
 
     def _on_sim_status(self, msg: String) -> None:
-        """On a new FE session (sim_time regression), seed the correction from
-        the current GT pose — the standard AMCL initial-pose fix. This makes the
+        """On a new FE session (session_id change), seed the correction from the
+        current GT pose — the standard AMCL initial-pose fix. This makes the
         estimate correct from tick 1 instead of converging from odom==spawn,
         which is what otherwise lets the not-yet-localized robot place phantom
-        towel tracks during a cold start."""
-        try:
-            sim_time = float(json.loads(msg.data).get("sim_time", 0.0))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return
-        regressed = self._last_sim_time is not None and sim_time < self._last_sim_time - 1.0
-        self._last_sim_time = sim_time
-        if (regressed or self._correction == (0.0, 0.0, 0.0)) \
+        towel tracks during a cold start. SessionWatch ignores competing
+        concurrent tabs so a duplicate tab can't cause a re-seed storm."""
+        restarted = self._session.update_raw(msg.data, time.monotonic())
+        if (restarted or self._correction == (0.0, 0.0, 0.0)) \
                 and self._gt is not None and self._odom is not None:
             self._correction = compose(self._gt, invert(self._odom))
             self._low_score_since = None

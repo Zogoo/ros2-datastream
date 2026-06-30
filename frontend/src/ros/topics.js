@@ -16,6 +16,7 @@ export const TOPICS = {
   jointStates: { name: '/joint_states', type: 'sensor_msgs/JointState' },
   contacts: { name: '/robot/contacts', type: 'std_msgs/String' },
   events: { name: '/robot/events', type: 'std_msgs/String' },
+  heldObject: { name: '/robot/held_object', type: 'std_msgs/String' },
   groundTruthPose: { name: '/ground_truth/pose', type: 'geometry_msgs/PoseStamped' },
   groundTruthObjects: { name: '/ground_truth/objects', type: 'std_msgs/String' },
   simStatus: { name: '/sim/status', type: 'std_msgs/String' },

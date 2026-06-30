@@ -147,3 +147,81 @@ multimodal-belief problem **AMCL's particle filter** solves and the hill-climb c
 AMCL/Nav2 aren't packaged for the `lyrical` distro (Phase 0), so the documented next step
 is an in-house Monte-Carlo (particle-filter) localizer behind the same `/localization/pose`
 interface — at which point `GT_LOCALIZATION` can default off.
+
+## Session-restart detection (the reset-storm bug)
+
+Symptom: with the sim open in two browser tabs the robot drove in circles while
+mission_executor/towel_tracker/localizer logged "Sim session restarted" every
+~1 s — the mission FSM was being wiped before it could make progress.
+
+Root cause, proven from code: `/sim/status` is published *only* by
+`frontend/src/sensors/groundTruth.js`, and `core/clock.js` makes `sim_time`
+strictly monotonic (`simTime += steps*step`). With a single publisher the old
+detector (`sim_time < last − 1.0`) can never fire after the first heartbeat.
+Two live tabs publish two independent monotonic clocks; interleaved on the same
+rosbridge they look like an endless stream of regressions → reset storm.
+
+Fix (`onsen_robot_state/session.py`, `SessionWatch`): the FE stamps every
+heartbeat with a per-page-load `session_id` nonce. A restart is a *change* of
+that id. To stay robust when two tabs are briefly alive at once, the watch locks
+onto one session and only switches after the locked one has been silent for
+`stale_s` (3 s > 1 s heartbeat). A genuine reload (old tab's socket closes,
+heartbeats stop) triggers exactly one reset; a competing concurrent tab is
+ignored, so no storm. Shared by all three nodes (DRY); 7 unit tests cover
+first-boot, same-session, reload, two-tab interleave, and the legacy fallback.
+
+## Carry strategy: kinematic body vs physics joint
+
+Original approach used a Rapier `JointData.fixed()` impulse joint between the
+kinematic gripperBody and the dynamic item. Root cause of wall-sticking bugs:
+
+1. HELD_GROUPS (filter=0) lets the kinematic gripper pass through walls; the
+   fixed joint then pulls the *dynamic* item body into the same wall geometry.
+2. On release, FREE_GROUPS is restored while the item is partially inside wall
+   geometry → Rapier depenetration fires unpredictably, leaving items floating.
+
+Fix: switch held item to `KinematicPositionBased` at pickup; drive its
+translation to `fingertip + carryOffset` each tick. Kinematic bodies ignore
+physics forces — the item tracks the arm exactly. On release, switch back to
+`Dynamic` with current fingertip velocity. `objects.js:reset()` already uses
+`setBodyType(Dynamic)` confirming the API is stable at runtime.
+
+Visual feedback: mesh scale morphs on attach (`0.7×0.7×2.5`, bunched cloth)
+and restores on release (`1×1×1`, flat towel).
+
+## Gripper object tracking (what is held, not just whether held)
+
+| Method | Signal | Cost | Decision |
+|---|---|---|---|
+| Gripper-width encoder | finger separation → size | already simulated | grasp trigger |
+| Force/torque at wrist | payload mass → class lookup | extra sensor | chassis impulse cosmetic |
+| Wrist camera + DNN | direct visual ID | extra hardware + ML | out of scope |
+| **Gripper payload topic** | physics GT as sensor output | free in sim | **implemented** |
+
+`/robot/held_object` (std_msgs/String JSON) published by FE on every grasp
+change: `{held, object_id, object_class, position}`. Simulates a combined
+gripper-width + force sensor. Mission node subscribes in both GT and perception
+modes as the single source for `self._holding` + `self._held_class`, replacing
+event-based tracking that had race conditions on OBJECT_BINNED.
+
+## Grasp detection (gripper presence sensing)
+
+The arm must *know* what it is gripping rather than assume the grasp persists —
+otherwise a towel knocked loose against a wall leaves the arm reporting a
+phantom hold. Reviewed methods for a parallel-jaw gripper:
+
+| Method | Signal | Cost | Used here |
+|---|---|---|---|
+| **Gripper-width / position feedback** | fingers stop at a non-zero width on an object vs. fully closed when empty | encoder already present | **yes** — the standard production-gripper check (Robotiq, Franka Hand) |
+| Object presence in grasp volume | held body stays within the grasp radius of the fingertip | geometric, free in sim | **yes**, combined with width |
+| Tactile / GelSight | contact force + slip + shape | dedicated sensor + DNN | overkill for a rigid-box towel |
+| Motor current / effort threshold | grip current rises on contact | effort sensing | alternative, not needed |
+
+Implementation (`frontend/src/robot/arm.js _verifyGrasp`): each tick, the grasp
+is held iff the gripper servo is in the closed range **and** the grasped body is
+within the grasp volume; otherwise the FE emits `GRASP_LOST`, removes the joint,
+and the mission/HUD drop the hold. This is the width + presence check above,
+continuously evaluated. Sources:
+[soft gripper object recognition + force control](https://www.researchgate.net/publication/366613039_A_Sensory_Soft_Robotic_Gripper_Capable_of_Learning-Based_Object_Recognition_and_Force-Controlled_Grasping),
+[GelSight tactile sensing for grasp/slip](https://arxiv.org/pdf/1708.00922),
+[slip detection for grip-force optimization](https://arxiv.org/pdf/2202.06140).

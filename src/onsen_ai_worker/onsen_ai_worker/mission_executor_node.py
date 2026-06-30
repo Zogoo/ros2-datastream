@@ -48,6 +48,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 
 from onsen_robot_state import topics
+from onsen_robot_state.session import SessionWatch
 
 from .arm_kinematics import GRASP_Z, ArmModel, grasp_command, load_arm_model
 from .llm_client import complete_json, create_llm_client
@@ -105,13 +106,14 @@ class MissionExecutorNode(Node):
         self._odom_pose: dict | None = None
         self._towels: list[dict] = []
         self._holding = False
+        self._held_class: str | None = None  # object class currently in gripper
         self._arm_status = "IDLE"
         self._mode = "auto"
         self._safety = False
         self._nav_status = "idle"
         self._min_front: float | None = None
         self._detections: list[dict] = []
-        self._last_sim_time: float | None = None
+        self._session = SessionWatch()
 
         self._pub_twist = self.create_publisher(Twist, topics.CMD_VEL_AUTO, 10)
         self._pub_arm = self.create_publisher(String, topics.ARM_COMMAND, 10)
@@ -137,6 +139,10 @@ class MissionExecutorNode(Node):
         else:
             self.create_subscription(String, topics.TOWEL_TRACKS, self._on_tracks, 10)
             self.create_subscription(String, topics.EVENTS, self._on_event, 20)
+
+        # Primary held-state source in both modes: the FE publishes this on every
+        # grasp change from the physics simulation (gripper-width + payload sensor).
+        self.create_subscription(String, topics.HELD_OBJECT, self._on_held_object, 10)
 
         self.create_timer(0.2, self._tick)
         self.get_logger().info(
@@ -201,26 +207,32 @@ class MissionExecutorNode(Node):
         except json.JSONDecodeError:
             pass
 
-    def _on_event(self, msg: String) -> None:
+    def _on_held_object(self, msg: String) -> None:
+        """Primary held-state source (both GT and perception modes).
+        Published by the FE whenever the gripper acquires or releases an item —
+        equivalent to a combined gripper-width + payload sensor."""
         try:
-            event = json.loads(msg.data).get("event")
+            data = json.loads(msg.data)
         except json.JSONDecodeError:
             return
-        if event == "GRASP_ACQUIRED":
-            self._holding = True
-        elif event in ("GRASP_RELEASED", "OBJECT_BINNED"):
-            self._holding = False
+        self._holding = bool(data.get("held", False))
+        self._held_class = data.get("object_class")
+
+    def _on_event(self, msg: String) -> None:
+        # Kept for future event logging/debugging; held-state is now driven by
+        # _on_held_object so no holding updates here.
+        pass
 
     def _on_gt_objects(self, msg: String) -> None:
         try:
             objects = json.loads(msg.data).get("objects", [])
         except json.JSONDecodeError:
             return
+        # Only update towel targets; held-state comes from /robot/held_object.
         self._towels = [
             o for o in objects
             if o.get("class") == "towel" and not o.get("binned") and not o.get("held")
         ]
-        self._holding = any(o.get("held") for o in objects)
 
     # ── Other inputs ────────────────────────────────────────────────────────────
 
@@ -262,19 +274,16 @@ class MissionExecutorNode(Node):
             pass
 
     def _on_sim_status(self, msg: String) -> None:
-        """A drop in sim_time means the FE session restarted (browser reload);
-        clear stale FSM state so the robot doesn't resume a dead mission."""
-        try:
-            sim_time = float(json.loads(msg.data).get("sim_time", 0.0))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return
-        if self._last_sim_time is not None and sim_time < self._last_sim_time - 1.0:
+        """Reset stale FSM state when the FE session restarts (new session_id),
+        so the robot doesn't resume a dead mission. SessionWatch ignores
+        competing concurrent tabs, so a duplicate tab can't trigger a reset
+        storm (which previously made the robot circle forever)."""
+        if self._session.update_raw(msg.data, time.monotonic()):
             self._logic.reset()
             self._holding = False
             self._towels = []
             self._pub_nav_cancel.publish(String(data=json.dumps({})))
             self.get_logger().info("Sim session restarted — mission state reset")
-        self._last_sim_time = sim_time
 
     def _target_rel(self) -> tuple[float, float] | None:
         """Freshest base_link (x, y) of the currently targeted towel, taken
@@ -339,6 +348,7 @@ class MissionExecutorNode(Node):
             "reason": out.reason,
             "target_id": out.target_id or (self._logic.target or {}).get("id"),
             "holding": self._holding,
+            "held_class": self._held_class,
             "towels_remaining": len(self._towels),
             "pose_source": self._pose_source,
             "nav_status": self._nav_status,

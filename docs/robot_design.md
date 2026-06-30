@@ -103,6 +103,19 @@ Known limitations (documented, mitigated):
   creates a fixed joint to the still-dynamic towel; carried mass is pushed
   back onto the chassis (suspension visibly settles); release restores normal
   dynamics with the fingertip velocity
+- **Kinematic carry (no physics joint)**: on grasp the held item's Rapier body
+  is switched to `KinematicPositionBased` and driven directly to
+  `fingertip + carryOffset` every tick. The item tracks the arm exactly: no
+  joint stress, no wall-sticking (HELD_GROUPS prevents collisions, kinematic
+  body ignores forces), no depenetration surprises on release. On release the
+  body switches back to `Dynamic` and receives the current fingertip velocity
+  so it flies out realistically. Visual mesh is morphed to a bunched-cloth
+  scale while held and restored to flat on release
+- **Gripper payload sensor** (`/robot/held_object` topic): the FE publishes
+  `{held, object_id, object_class, position}` on every grasp change — the
+  physics-ground-truth equivalent of a combined gripper-width + force/torque
+  sensor. The mission node subscribes in both GT and perception modes as the
+  single authoritative source for what class of object is in the gripper
 
 ## Industrial design
 

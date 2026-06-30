@@ -115,6 +115,7 @@ async function boot() {
   let fps = 60;
   let lastFrame = performance.now();
   const dt = 1 / config.physicsHz;
+  let _prevHeldId = null;  // tracks last-published held_object id to publish only on change
 
   function frame(now) {
     const frameDelta = now - lastFrame;
@@ -154,6 +155,21 @@ async function boot() {
       });
       hud.ticker(`${event.event} ${event.object_id}`);
     }
+
+    // Publish held-object state whenever the held item changes.
+    // Represents a combined gripper-width + payload sensor: tells the mission
+    // node what class of object is in the gripper without requiring camera vision.
+    const _curHeldId = robot.arm.heldItem?.id ?? null;
+    if (_curHeldId !== _prevHeldId) {
+      _prevHeldId = _curHeldId;
+      const info = robot.arm.heldObjectInfo();
+      ros.publish(TOPICS.heldObject, {
+        data: JSON.stringify(info
+          ? { held: true, ...info, timestamp: new Date().toISOString() }
+          : { held: false, timestamp: new Date().toISOString() }),
+      });
+    }
+
     for (const event of objects.drainBinnedEvents()) {
       ros.publish(TOPICS.events, {
         data: JSON.stringify({ ...event, timestamp: new Date().toISOString() }),

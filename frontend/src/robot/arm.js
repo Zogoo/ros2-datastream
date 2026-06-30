@@ -1,8 +1,17 @@
 import * as THREE from 'three';
 import { armFk, gripperOpening, isGripperClosed, servoStep } from './kinematics.js';
-import { GROUP_ARM, GROUP_ROBOT, GROUP_WORLD, groups } from '../physics/world.js';
+import { GROUP_ARM, GROUP_OBJECT, GROUP_WORLD, OBJECT_FILTER, groups } from '../physics/world.js';
 
 const GRAVITY = 9.81;
+// While held the item belongs to GROUP_OBJECT but collides with nothing —
+// walls and furniture cannot interact with a carried prop.
+const HELD_GROUPS = groups(GROUP_OBJECT, 0);
+// Free props use the normal object filter so they rest on the floor.
+const FREE_GROUPS = groups(GROUP_OBJECT, OBJECT_FILTER);
+
+// Visual scale applied to a towel-class item while gripped (bunched cloth appearance).
+const GRIP_SCALE = new THREE.Vector3(0.70, 0.70, 2.5);
+const FREE_SCALE = new THREE.Vector3(1, 1, 1);
 
 const HOME = [90, 90, 90, 90, 90, 70];
 
@@ -10,8 +19,17 @@ const HOME = [90, 90, 90, 90, 90, 70];
  *  gripper payload/force sensor: a sensor signal, not ground truth. */
 export const graspEvents = [];
 
-/** 6-axis arm: servo lag toward firmware joint targets, FK-driven visuals,
- *  kinematic colliders for forearm/gripper, and geometric grasping. */
+/**
+ * 6-axis arm: servo lag toward firmware joint targets, FK-driven visuals,
+ * kinematic colliders for forearm/gripper, and kinematic-body carry.
+ *
+ * Carry strategy: on grasp the held item's Rapier body is switched to
+ * KinematicPositionBased and driven to (fingertip + carryOffset) every tick.
+ * This guarantees the item follows the arm exactly with no joint stress, no
+ * depenetration surprises on release, and no wall-sticking — HELD_GROUPS
+ * already prevents collisions while carried. On release the body is switched
+ * back to Dynamic and given the current fingertip velocity.
+ */
 export class Arm {
   constructor(physics, robot, armSpec, objects) {
     this.physics = physics;
@@ -22,7 +40,7 @@ export class Arm {
     this.current = [...HOME];
     this.target = [...HOME];
     this.heldItem = null;
-    this.graspJoint = null;
+    this._carryOffset = null;   // world-frame offset: item_center − fingertip at pickup
     this.wasClosed = false;
     this.lastFingertip = null;
     this.fingertipVel = { x: 0, y: 0, z: 0 };
@@ -39,14 +57,14 @@ export class Arm {
     this.forearmBody = makeBody();
     const forearmCol = world.createCollider(
       R.ColliderDesc.capsule(this.spec.links.forearm / 2, 0.03)
-        .setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD)),
+        .setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD | GROUP_OBJECT)),
       this.forearmBody,
     );
     this.physics.registerMeta(forearmCol, { kind: 'robot', part: 'arm_forearm' });
 
     this.gripperBody = makeBody();
     const gripCol = world.createCollider(
-      R.ColliderDesc.ball(0.045).setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD)),
+      R.ColliderDesc.ball(0.045).setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD | GROUP_OBJECT)),
       this.gripperBody,
     );
     this.physics.registerMeta(gripCol, { kind: 'robot', part: 'gripper' });
@@ -87,6 +105,17 @@ export class Arm {
     return this.heldItem !== null;
   }
 
+  /** Returns {object_id, object_class, position} of the held item, or null. */
+  heldObjectInfo() {
+    if (!this.heldItem) return null;
+    const p = this.heldItem.body.translation();
+    return {
+      object_id: this.heldItem.id,
+      object_class: this.heldItem.cls,
+      position: { x: p.x, y: p.y, z: p.z },
+    };
+  }
+
   forceRelease() {
     if (this.heldItem) this._release();
   }
@@ -114,6 +143,7 @@ export class Arm {
 
     this._syncKinematics(pts);
     this._updateGrasp(pts[3]);
+    this._carryKinematic(pts[3]);
     this._transferCarriedLoad(dt, pts[3]);
     this._syncVisuals(pts);
   }
@@ -125,8 +155,6 @@ export class Arm {
     this.gripperBody.setNextKinematicTranslation(pts[3]);
   }
 
-  /** Grasp = a real fixed joint to the (still dynamic) item, so carried towels
-   *  keep their mass, drag on furniture and fail on bad geometry. */
   _updateGrasp(fingertip) {
     const closed = isGripperClosed(this.current[5], this.spec);
     if (closed && !this.wasClosed && !this.heldItem) {
@@ -140,40 +168,58 @@ export class Arm {
     this.wasClosed = closed;
   }
 
+  /**
+   * Switch the item to kinematic carry. We drive its body translation directly
+   * each tick instead of using an impulse joint. Eliminates wall-sticking (no
+   * joint pulling the item into wall geometry) and depenetration surprises on
+   * release. Visual scale is morphed to a bunched-cloth shape.
+   */
   _attach(item, fingertip) {
-    const { R, world } = this.physics;
+    const { R } = this.physics;
     const ip = item.body.translation();
-    // Anchor at the current relative pose so the joint never snaps the item.
-    const params = R.JointData.fixed(
-      { x: ip.x - fingertip.x, y: ip.y - fingertip.y, z: ip.z - fingertip.z },
-      item.body.rotation(),
-      { x: 0, y: 0, z: 0 },
-      { w: 1, x: 0, y: 0, z: 0 },
-    );
-    this.graspJoint = world.createImpulseJoint(params, this.gripperBody, item.body, true);
-    // The fingers hold it now — stop the gripper/chassis colliders fighting the
-    // joint (the pan sweep would otherwise drag it through the basket walls).
-    item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff & ~(GROUP_ARM | GROUP_ROBOT)));
+    this._carryOffset = { x: ip.x - fingertip.x, y: ip.y - fingertip.y, z: ip.z - fingertip.z };
+    item.body.setBodyType(R.RigidBodyType.KinematicPositionBased, true);
+    item.collider.setCollisionGroups(HELD_GROUPS);
     item.held = true;
     this.heldItem = item;
+    item.mesh.scale.copy(GRIP_SCALE);
     graspEvents.push({ event: 'GRASP_ACQUIRED', object_id: item.id, object_class: item.cls });
   }
 
   _release() {
-    const item = this.heldItem;
-    this.heldItem = null;
-    if (this.graspJoint) {
-      this.physics.world.removeImpulseJoint(this.graspJoint, true);
-      this.graspJoint = null;
-    }
-    item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff));
-    item.held = false;
-    item.body.setLinvel(this.fingertipVel, true);
-    graspEvents.push({ event: 'GRASP_RELEASED', object_id: item.id, object_class: item.cls });
+    this._endGrasp('GRASP_RELEASED', this.fingertipVel);
   }
 
-  /** The kinematic gripper body absorbs joint forces, so push the carried
-   *  weight back onto the chassis — the suspension visibly settles. */
+  /**
+   * Drive the kinematic held item to follow the fingertip exactly.
+   * Kinematic bodies ignore all physics forces so the item cannot be knocked
+   * loose or dragged into walls while carried.
+   */
+  _carryKinematic(fingertip) {
+    if (!this.heldItem || !this._carryOffset) return;
+    this.heldItem.body.setNextKinematicTranslation({
+      x: fingertip.x + this._carryOffset.x,
+      y: fingertip.y + this._carryOffset.y,
+      z: fingertip.z + this._carryOffset.z,
+    });
+  }
+
+  _endGrasp(event, releaseVel) {
+    const { R } = this.physics;
+    const item = this.heldItem;
+    this.heldItem = null;
+    this._carryOffset = null;
+    // Restore dynamic physics BEFORE restoring collisions so Rapier can solve
+    // the first contact tick correctly without depenetration explosions.
+    item.body.setBodyType(R.RigidBodyType.Dynamic, true);
+    item.collider.setCollisionGroups(FREE_GROUPS);
+    item.held = false;
+    item.body.setLinvel(releaseVel, true);
+    item.mesh.scale.copy(FREE_SCALE);
+    graspEvents.push({ event, object_id: item.id, object_class: item.cls });
+  }
+
+  /** Push carried weight back onto the chassis so the suspension visibly settles. */
   _transferCarriedLoad(dt, fingertip) {
     if (!this.heldItem || dt <= 0) return;
     const m = this.heldItem.body.mass();

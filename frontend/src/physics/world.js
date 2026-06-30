@@ -1,8 +1,16 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 
-export const GROUP_WORLD = 0x0001;
-export const GROUP_ROBOT = 0x0002;
-export const GROUP_ARM = 0x0004;
+export const GROUP_WORLD = 0x0001;   // static structure: walls, partitions, bins, floor
+export const GROUP_ROBOT = 0x0002;   // robot chassis / contact skirt
+export const GROUP_ARM = 0x0004;     // kinematic arm links + gripper
+export const GROUP_OBJECT = 0x0008;  // movable props: towels, stools, buckets, bottles
+
+// Movable props collide with the world, the robot, the arm and each other —
+// but are a distinct membership from the static world so a *held* prop can be
+// excluded from wall collisions without also disabling floor/robot collisions
+// for the free props. (Bug fix: walls and objects were both GROUP_WORLD, so a
+// carried towel was ripped off the gripper by walls.)
+export const OBJECT_FILTER = GROUP_WORLD | GROUP_ROBOT | GROUP_ARM | GROUP_OBJECT;
 
 export const groups = (memberships, filter) => ((memberships << 16) | filter) >>> 0;
 
@@ -62,7 +70,7 @@ export class PhysicsWorld {
       .setMass(mass)
       .setFriction(friction)
       .setRestitution(restitution)
-      .setCollisionGroups(groups(GROUP_WORLD, 0xffff));
+      .setCollisionGroups(groups(GROUP_OBJECT, OBJECT_FILTER));
     const collider = this.world.createCollider(desc, body);
     if (meta) this.registerMeta(collider, meta);
     return { body, collider };
