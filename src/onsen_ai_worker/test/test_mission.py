@@ -33,12 +33,12 @@ def towel(x, y, tid="towel_1"):
 def make_input(
     pose, towels=(), holding=False, arm_status="IDLE",
     safety_stop=False, mode="auto", nav_status="idle", min_front=None,
-    target_rel=None,
+    target_rel=None, arm_contact=False,
 ):
     return MissionInput(
         pose=pose, towels=list(towels), holding=holding, arm_status=arm_status,
         safety_stop=safety_stop, mode=mode, nav_status=nav_status,
-        min_front_obstacle=min_front, target_rel=target_rel,
+        min_front_obstacle=min_front, target_rel=target_rel, arm_contact=arm_contact,
     )
 
 
@@ -146,6 +146,23 @@ class TestApproachNavProtocol:
         # towel jumps 0.6 m (> RETARGET_DIST) -> new goal
         g2 = logic.update(make_input(pose, [towel(3.0, 0.7)], nav_status="active"))
         assert g2.nav_goal is not None
+
+    def test_goal_not_reissued_when_only_pose_moves(self):
+        """Regression: the standoff direction used to be recomputed from the
+        live pose every tick, so as the robot's heading/position changed while
+        following a curved A* path (the towel never moving), the goal would
+        drift past RETARGET_DIST and force a churn-inducing replan. It must
+        now stay anchored to the pose seen when APPROACH was entered."""
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "SEARCH"
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        towels = [towel(3.0, 0.0)]
+        logic.update(make_input(pose, towels))          # SEARCH -> APPROACH
+        g1 = logic.update(make_input(pose, towels))      # emits goal, anchors at (0,0)
+        assert g1.nav_goal is not None
+        moved_pose = {"x": 1.0, "y": 1.5, "yaw": 0.9}    # robot moved, towel didn't
+        g2 = logic.update(make_input(moved_pose, towels, nav_status="active"))
+        assert g2.nav_goal is None, "goal must not be re-issued from pose drift alone"
 
 
 class TestAlignPick:
@@ -431,3 +448,53 @@ class TestDirectBaseLinkGrasp:
             target_rel=None,
         ))
         assert logic.state == "PICK"  # track-via-pose still works when aligned
+
+
+class TestArmContact:
+    """ARM_CONTACT = the forearm/gripper hit static geometry mid-sequence (a
+    real servo would stall). The FSM must abort in-flight PICK/DROP work
+    immediately instead of continuing to press into the obstacle."""
+
+    def test_contact_while_picking_not_holding_aborts_and_homes(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "PICK"
+        logic.target = towel(SCOOP_FORWARD, 0.0, "track_1")
+        logic._seq.commands = ["A PICK_SCOOP"]
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        out = logic.update(make_input(pose, [logic.target], holding=False, arm_contact=True))
+        assert out.arm_command == "A HOME"
+        assert logic.state == "SEARCH"
+        assert logic._seq.commands == []
+
+    def test_contact_while_holding_retracts_and_continues_delivery(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "DROP"
+        logic._seq.commands = ["A DROP_BIN"]
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        out = logic.update(make_input(pose, [], holding=True, arm_contact=True))
+        assert out.arm_command == "A HOME"
+        assert logic.state == "TO_BIN"
+
+    def test_contact_ignored_outside_pick_drop_states(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "SEARCH"
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        logic.update(make_input(pose, [], arm_contact=True))
+        assert logic.state == "SEARCH"  # unaffected — no sequence in flight to abort
+
+    def test_contact_counts_toward_pick_failure_bookkeeping(self):
+        """A wall-contact abort must park a chronically unreachable towel just
+        like a missed grasp — otherwise the robot retries the same doomed pick
+        (right next to the same wall) forever."""
+        logic = MissionLogic(BIN_CENTER)
+        t = towel(SCOOP_FORWARD, 0.0, "track_1")
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        parked = False
+        for _ in range(MAX_PICK_ATTEMPTS + 1):
+            logic.state = "PICK"
+            logic.target = t
+            out = logic.update(make_input(pose, [t], holding=False, arm_contact=True))
+            if "parked" in out.reason:
+                parked = True
+                break
+        assert parked

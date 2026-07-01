@@ -54,6 +54,9 @@ LAYOUT_PATH = os.environ.get("ONSEN_LAYOUT_PATH", "/ros2_ws/shared/onsen_layout.
 ROBOT_RADIUS = 0.30          # half-width 0.26 + clearance
 YAW_TOLERANCE = 0.10
 BLOCKED_FAIL_S = 8.0
+BLOCKED_RECOVER_S = 3.0      # blocked this long -> try one recovery before giving up
+RECOVER_BACKUP_S = 1.0
+RECOVER_BACKUP_V = -0.08
 POSE_STALE_S = 1.5
 TICK_HZ = 10.0
 
@@ -70,6 +73,11 @@ class NavServerNode(Node):
         self._state = "idle"
         self._distance = 0.0
         self._blocked_since: float | None = None
+        # One recovery attempt (back up + replan) before a block is a hard
+        # failure — matches Nav2's simplest recovery behavior tree, cheap
+        # enough to add without a new dependency.
+        self._recovering_until: float | None = None
+        self._recovered_once = False
 
         self._pose: tuple[float, float, float] | None = None
         self._pose_at = 0.0
@@ -118,6 +126,8 @@ class NavServerNode(Node):
         self._path = None
         self._state = "active"
         self._blocked_since = None
+        self._recovering_until = None
+        self._recovered_once = False
 
     def _on_cancel(self, _msg: String) -> None:
         if self._state == "active":
@@ -130,14 +140,32 @@ class NavServerNode(Node):
         self._pose_at = self._now()
 
     def _on_scan(self, msg: LaserScan) -> None:
+        """Front-sector minimum range, but only over UNMAPPED hits. A* already
+        keeps ROBOT_RADIUS clearance from every wall/prop it plans past, so in
+        a corridor no wider than ~2x that clearance the lidar legitimately
+        reads a mapped wall inside obstacle_slow_range on every tick — that
+        used to crawl the tracker permanently, not just for genuine hazards
+        (an unmapped/dynamic obstacle the planner never saw)."""
         n = len(msg.ranges)
-        if n == 0:
+        if n == 0 or self._pose is None:
+            self._min_front = None
             return
         window = n // 8
         mid = n // 2
-        sector = msg.ranges[mid - window: mid + window]
-        valid = [r for r in sector if r is not None and msg.range_min < r < msg.range_max]
-        self._min_front = min(valid) if valid else None
+        x, y, yaw = self._pose
+        best = None
+        for i in range(mid - window, mid + window):
+            r = msg.ranges[i]
+            if r is None or not (msg.range_min < r < msg.range_max):
+                continue
+            bearing = yaw + msg.angle_min + i * msg.angle_increment
+            hx = x + r * math.cos(bearing)
+            hy = y + r * math.sin(bearing)
+            if self._grid.is_lethal(hx, hy):
+                continue
+            if best is None or r < best:
+                best = r
+        self._min_front = best
 
     def _on_scan_low(self, msg: LaserScan) -> None:
         # forward cone only (±20°): a towel beside the path must not stall us
@@ -169,6 +197,17 @@ class NavServerNode(Node):
             return
         if self._pose is None or self._now() - self._pose_at > POSE_STALE_S:
             return
+
+        now = self._now()
+        if self._recovering_until is not None:
+            if now < self._recovering_until:
+                self._publish_twist(RECOVER_BACKUP_V, 0.0)
+                return
+            # Backup finished — force a fresh plan from the backed-up pose.
+            self._recovering_until = None
+            self._path = None
+            self._blocked_since = None
+
         if self._path is None and not self._plan():
             return
         assert self._path is not None
@@ -182,12 +221,25 @@ class NavServerNode(Node):
 
         if out.blocked:
             if self._blocked_since is None:
-                self._blocked_since = self._now()
-            elif self._now() - self._blocked_since > BLOCKED_FAIL_S:
-                self._finish("failed")
-                return
+                self._blocked_since = now
+            else:
+                elapsed = now - self._blocked_since
+                # One recovery (back up, replan) before a hard failure — the
+                # simplest Nav2-style recovery behavior. Without it a robot
+                # wedged against clutter (or a transient obstacle that will
+                # clear) gives up on the whole target instead of trying an
+                # escape maneuver first.
+                if not self._recovered_once and elapsed > BLOCKED_RECOVER_S:
+                    self._recovered_once = True
+                    self._recovering_until = now + RECOVER_BACKUP_S
+                    self._publish_twist(RECOVER_BACKUP_V, 0.0)
+                    return
+                if elapsed > BLOCKED_FAIL_S:
+                    self._finish("failed")
+                    return
         else:
             self._blocked_since = None
+            self._recovered_once = False
 
         if out.done:
             if not self._align_final_yaw():
@@ -226,6 +278,8 @@ class NavServerNode(Node):
         self._state = state
         self._path = None
         self._blocked_since = None
+        self._recovering_until = None
+        self._recovered_once = False
         self._publish_twist(0.0, 0.0)
         self._publish_status()
 

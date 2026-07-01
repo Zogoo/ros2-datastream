@@ -128,6 +128,7 @@ async function boot() {
       objects.update(dt);
       physics.step();
       contacts.update();
+      robot.arm.drainWallContacts();
       lidar.update();
       imu.update(dt);
       odom.update(dt);
@@ -208,6 +209,7 @@ async function boot() {
       return { x: p.x, y: p.y, z: p.z, held: item.held, binned: item.binned };
     },
     holding: () => robot.arm.holding(),
+    armFingertip: () => robot.arm.fkWorld?.[3] ?? null,
     depthStats: () => {
       const px = camDepth.pixels;
       const mm = camDepth.depthMm;

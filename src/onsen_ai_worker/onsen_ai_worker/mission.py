@@ -55,6 +55,11 @@ class MissionInput:
     mode: str                              # auto | manual
     nav_status: str = "idle"               # idle|active|succeeded|failed|cancelled
     min_front_obstacle: float | None = None
+    # One-shot edge: the arm reported ARM_CONTACT this tick (forearm/gripper
+    # touched static geometry mid-sequence). A real servo would stall here —
+    # abort the in-flight PICK/DROP sequence instead of continuing to press
+    # into the obstacle. Cleared by the caller after each update().
+    arm_contact: bool = False
     # Freshest depth-refined base_link (x, y) of the targeted towel, measured
     # directly from the camera this tick. Localization-independent, so the final
     # grasp uses it in preference to the map-track-via-localized-pose estimate
@@ -96,6 +101,9 @@ class MissionLogic:
         self.target: dict[str, Any] | None = None
         self._seq = _SeqState()
         self._nav_goal: tuple[float, float, float] | None = None  # last goal emitted
+        # Robot position when APPROACH/TO_BIN was entered — freezes the
+        # standoff approach direction for that leg (see _state_approach).
+        self._nav_anchor: tuple[float, float] | None = None
         self._retries = 0
         self._was_active = False  # saw nav_status==active since the goal was emitted
         # Per-target pick-attempt accounting: a towel that can't be grasped
@@ -112,6 +120,8 @@ class MissionLogic:
             return self._abort("safety stop latched")
         if inp.mode != "auto":
             return self._abort("manual mode")
+        if inp.arm_contact and self.state in ("PICK", "DROP"):
+            return self._handle_arm_contact(inp)
 
         handler = getattr(self, f"_state_{self.state.lower()}", None)
         if handler is None:
@@ -159,7 +169,15 @@ class MissionLogic:
             self._enter("ALIGN_PICK")
             return MissionOutput(state="APPROACH", nav_cancel=True, reason="at pick standoff")
 
-        goal = self._standoff_goal(towel["position"], inp.pose)
+        # The approach direction is frozen to the pose seen when APPROACH was
+        # entered, not recomputed from the live (moving) pose every tick.
+        # Recomputing it live made the standoff point orbit the towel as the
+        # A* path curved the robot's heading, drifting the goal past
+        # RETARGET_DIST and forcing a replan — pure churn, since the towel
+        # itself hadn't moved.
+        if self._nav_anchor is None:
+            self._nav_anchor = (inp.pose["x"], inp.pose["y"])
+        goal = self._standoff_goal(towel["position"], self._nav_anchor)
         out = self._navigate(inp, goal, "APPROACH", target_id=towel["id"])
         if out is not None:
             return out
@@ -201,33 +219,19 @@ class MissionLogic:
             self._consecutive_fails = 0
             self._enter("TO_BIN")
             return MissionOutput(state="PICK", reason="towel grasped — delivering")
-        # grasp failed. Two guards stop the arm looping forever:
-        #  - per-target: park a specific towel after MAX_PICK_ATTEMPTS fails
-        #  - global: after GLOBAL_FAIL_LIMIT fails in a row (even across churning
-        #    phantom ids that defeat the per-target counter) enter a patrol
-        #    cooldown so the robot stops hammering and lets perception settle.
-        self._consecutive_fails += 1
-        if self._consecutive_fails >= GLOBAL_FAIL_LIMIT:
-            self._cooldown = COOLDOWN_TICKS
-            self._consecutive_fails = 0
-            self._enter("SEARCH")
-            return MissionOutput(state="PICK", reason="too many failed picks — cooldown")
-        if tid:
-            self._attempts[tid] = self._attempts.get(tid, 0) + 1
-            if self._attempts[tid] >= MAX_PICK_ATTEMPTS:
-                self._parked[tid] = PARK_TICKS
-                self._attempts.pop(tid, None)
-                self._enter("SEARCH")
-                return MissionOutput(state="PICK", reason=f"{tid} unreachable — parked")
-        self._enter("SEARCH")
-        return MissionOutput(state="PICK", reason="grasp failed — retry")
+        return self._record_pick_failure("PICK", "grasp failed — retry")
 
     def _state_to_bin(self, inp: MissionInput) -> MissionOutput:
         if not inp.holding:
             self._enter("SEARCH")
             return MissionOutput(state="TO_BIN", nav_cancel=True, reason="payload lost")
+        # Same anchor-freeze as APPROACH: bin_center is fixed, but recomputing
+        # the standoff direction from the live pose every tick made the goal
+        # drift past RETARGET_DIST as the A* path curved, churning replans.
+        if self._nav_anchor is None:
+            self._nav_anchor = (inp.pose["x"], inp.pose["y"])
         standoff = math.hypot(*DROP_OFFSET)
-        gx, gy = standoff_point(self.bin_center, (inp.pose["x"], inp.pose["y"]), standoff)
+        gx, gy = standoff_point(self.bin_center, self._nav_anchor, standoff)
         bin_yaw = math.atan2(self.bin_center[1] - gy, self.bin_center[0] - gx)
         out = self._navigate(inp, (gx, gy, bin_yaw), "TO_BIN")
         if out is not None:
@@ -292,11 +296,9 @@ class MissionLogic:
         return math.hypot(goal[0] - self._nav_goal[0], goal[1] - self._nav_goal[1]) > RETARGET_DIST
 
     def _standoff_goal(
-        self, towel: dict[str, float], pose: dict[str, float],
+        self, towel: dict[str, float], anchor: tuple[float, float],
     ) -> tuple[float, float, float]:
-        gx, gy = standoff_point(
-            (towel["x"], towel["y"]), (pose["x"], pose["y"]), SCOOP_FORWARD,
-        )
+        gx, gy = standoff_point((towel["x"], towel["y"]), anchor, SCOOP_FORWARD)
         yaw = math.atan2(towel["y"] - gy, towel["x"] - gx)
         return (gx, gy, yaw)
 
@@ -309,6 +311,49 @@ class MissionLogic:
             if reach is not None:
                 return [*PICK_PREAMBLE, reach, *PICK_GRASP]
         return list(PICK_SEQUENCE)
+
+    def _handle_arm_contact(self, inp: MissionInput) -> MissionOutput:
+        """The arm's forearm/gripper touched static geometry mid-sequence (a
+        real servo would stall on this). Abandon the in-flight PICK/DROP
+        sequence immediately — never keep pressing into the obstacle — force
+        the arm home, and re-route through the normal failure/delivery paths
+        instead of a special case: still holding -> keep delivering (TO_BIN
+        re-plans its own approach); not holding -> record it as a failed pick
+        via the same park/cooldown bookkeeping as a missed grasp."""
+        label = self.state
+        if inp.holding:
+            self._enter("TO_BIN")
+            return MissionOutput(state=label, arm_command="A HOME",
+                                 reason="arm contact — retracting, still holding")
+        out = self._record_pick_failure(label, "arm contact — aborted pick")
+        out.arm_command = "A HOME"
+        return out
+
+    def _record_pick_failure(self, label: str, reason: str) -> MissionOutput:
+        """Shared bookkeeping for 'this pick attempt did not succeed', used both
+        by a normal missed grasp and by an arm-contact abort. Two guards stop
+        the arm looping forever:
+          - per-target: park a specific towel after MAX_PICK_ATTEMPTS fails
+          - global: after GLOBAL_FAIL_LIMIT fails in a row (even across churning
+            phantom ids that defeat the per-target counter) enter a patrol
+            cooldown so the robot stops hammering and lets perception settle.
+        """
+        tid = self.target["id"] if self.target else None
+        self._consecutive_fails += 1
+        if self._consecutive_fails >= GLOBAL_FAIL_LIMIT:
+            self._cooldown = COOLDOWN_TICKS
+            self._consecutive_fails = 0
+            self._enter("SEARCH")
+            return MissionOutput(state=label, reason="too many failed picks — cooldown")
+        if tid:
+            self._attempts[tid] = self._attempts.get(tid, 0) + 1
+            if self._attempts[tid] >= MAX_PICK_ATTEMPTS:
+                self._parked[tid] = PARK_TICKS
+                self._attempts.pop(tid, None)
+                self._enter("SEARCH")
+                return MissionOutput(state=label, reason=f"{tid} unreachable — parked")
+        self._enter("SEARCH")
+        return MissionOutput(state=label, reason=reason)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -358,6 +403,7 @@ class MissionLogic:
         self.target = None
         self._seq = _SeqState()
         self._nav_goal = None
+        self._nav_anchor = None
         self._was_active = False
         self._retries = 0
         self._attempts.clear()
@@ -370,6 +416,7 @@ class MissionLogic:
         self.state = state
         self._seq = _SeqState()
         self._nav_goal = None
+        self._nav_anchor = None
         self._was_active = False
 
     def _abort(self, reason: str) -> MissionOutput:

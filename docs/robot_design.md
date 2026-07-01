@@ -111,11 +111,16 @@ Known limitations (documented, mitigated):
   body switches back to `Dynamic` and receives the current fingertip velocity
   so it flies out realistically. Visual mesh is morphed to a bunched-cloth
   scale while held and restored to flat on release
-- **Gripper payload sensor** (`/robot/held_object` topic): the FE publishes
-  `{held, object_id, object_class, position}` on every grasp change — the
-  physics-ground-truth equivalent of a combined gripper-width + force/torque
-  sensor. The mission node subscribes in both GT and perception modes as the
-  single authoritative source for what class of object is in the gripper
+- **Holding detection — two signals**: the mission gates on the gripper's own
+  grasp-state feedback (`/robot/held_object`, the reliable "did my commanded
+  grasp engage an object" flag a real gripper controller reports). A wrist load
+  cell provides an independent force-based confirmation: the FE reports the
+  payload weight (`mass·g`, N) on the wrist joint's effort channel of
+  `/joint_states` — pose-independent, unlike shoulder torque which vanishes at
+  the lifted pose — which `arm_controller` thresholds (debounced) into
+  `gripper_holding` on `/arm/state`, surfaced as telemetry in `/mission/state`.
+  See docs/research_notes.md for why the direct grasp-state feedback is the
+  control gate and the force signal is confirmation-only
 
 ## Industrial design
 

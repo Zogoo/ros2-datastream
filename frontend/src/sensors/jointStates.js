@@ -35,7 +35,7 @@ export class JointStateSensor {
       name: [...ARM_JOINT_NAMES, ...WHEEL_JOINT_NAMES],
       position: [...armRad, ...wheelAngles],
       velocity: [0, 0, 0, 0, 0, 0, ...wheelVels],
-      effort: new Array(12).fill(0),
+      effort: [...this.robot.arm.effort, 0, 0, 0, 0, 0, 0],
     });
   }
 }

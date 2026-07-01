@@ -64,3 +64,15 @@ class TestTracking:
         out = tracker().step((1.0, 0.1, math.pi / 2), path)
         assert out.vx > 0.0
         assert out.distance_remaining > 1.0
+
+    def test_obstacle_slowdown_preserves_steering_authority(self):
+        """Regression: wz used to be v*kappa using the OBSTACLE-slowed v, so
+        crawling near a wall crushed steering (couldn't correct bearing to
+        curve past it) -> stop-rotate-crawl limit cycle. wz must now come from
+        the curvature/approach-regulated speed, not the post-obstacle speed."""
+        t = tracker()
+        path = [(0.0, 0.0), (3.0, 1.7)]  # off-axis target -> nonzero curvature
+        clear = t.step((0, 0, 0), path, min_obstacle=None)
+        slowed = t.step((0, 0, 0), path, min_obstacle=0.35)  # inside slow range
+        assert slowed.vx < clear.vx, "obstacle proximity must still slow the robot"
+        assert slowed.wz == clear.wz, "but must not reduce steering rate"

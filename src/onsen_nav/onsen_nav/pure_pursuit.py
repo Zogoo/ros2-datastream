@@ -65,6 +65,12 @@ class PurePursuit:
         if abs(kappa) > 1e-6:
             v = min(v, self.p.curvature_reg / abs(kappa))
         v = min(v, self.p.approach_gain * dist_goal)
+        # Steering rate is derived from this curvature/approach-regulated speed
+        # only, NOT from the post-obstacle speed below. Coupling wz to the
+        # obstacle-slowed v crushed steering authority exactly when a bearing
+        # correction was needed most (hugging a corner near a wall), producing
+        # a stop-rotate-crawl limit cycle instead of a smooth arc past it.
+        wz_speed = v
 
         blocked = False
         if min_obstacle is not None:
@@ -74,7 +80,7 @@ class PurePursuit:
                 v = min(v, self.p.v_obstacle)
 
         v = max(self.p.v_min, v)
-        wz = clamp(v * kappa, -self.p.w_max, self.p.w_max)
+        wz = clamp(wz_speed * kappa, -self.p.w_max, self.p.w_max)
         return TrackerOutput(v, wz, False, dist_goal, blocked=blocked)
 
     def _lookahead_point(

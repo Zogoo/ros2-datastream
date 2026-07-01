@@ -8,9 +8,11 @@ arbitration via llm_client (mock by default, OpenAI-compatible via env).
 
 Autonomy is genuine: towel targets come from the perception tracker
 (/perception/towel_tracks), pose from the scan-matcher localizer
-(/localization/pose), and "holding" from the gripper payload event
-(/robot/events GRASP_*). Ground truth is NOT in the control path — set
-MISSION_USE_GT=true only for A/B comparison against /ground_truth/*.
+(/localization/pose), and "holding" from the gripper's grasp-state feedback
+(/robot/held_object). The wrist-load-cell force (/arm/state gripper_holding) is
+an independent force-based confirmation sensor carried in /mission/state for
+telemetry. Ground truth is NOT in the control path — set MISSION_USE_GT=true
+only for A/B comparison against /ground_truth/*.
 
 Topics in:
   /perception/towel_tracks std_msgs/String  map-frame towel targets
@@ -18,9 +20,10 @@ Topics in:
   /odom                    nav_msgs/Odometry  degraded pose fallback
   /nav/status              std_msgs/String  navigation goal status
   /scan                    sensor_msgs/LaserScan  front-obstacle awareness
-  /arm/state               std_msgs/String  firmware status gating sequences
+  /arm/state               std_msgs/String  firmware status + gripper_holding
   /robot/control_mode      std_msgs/String  only acts in auto mode
-  /robot/events            std_msgs/String  GRASP_ACQUIRED/RELEASED -> holding
+  /robot/events            std_msgs/String  ARM_CONTACT -> abort in-flight sequence
+  /robot/held_object       std_msgs/String  display-only object_class label
   /safety/stop             std_msgs/Bool    aborts to IDLE
   /detected_objects        std_msgs/String  LLM context
   (MISSION_USE_GT) /ground_truth/{objects,pose}  eval-only fallback
@@ -107,6 +110,7 @@ class MissionExecutorNode(Node):
         self._towels: list[dict] = []
         self._holding = False
         self._held_class: str | None = None  # object class currently in gripper
+        self._gripper_holding_sensor = False  # wrist-load-cell confirmation (telemetry)
         self._arm_status = "IDLE"
         self._mode = "auto"
         self._safety = False
@@ -114,6 +118,7 @@ class MissionExecutorNode(Node):
         self._min_front: float | None = None
         self._detections: list[dict] = []
         self._session = SessionWatch()
+        self._arm_contact_pending = False  # one-shot edge, consumed each _tick
 
         self._pub_twist = self.create_publisher(Twist, topics.CMD_VEL_AUTO, 10)
         self._pub_arm = self.create_publisher(String, topics.ARM_COMMAND, 10)
@@ -138,11 +143,14 @@ class MissionExecutorNode(Node):
             self.create_subscription(PoseStamped, topics.GROUND_TRUTH_POSE, self._on_gt_pose, 10)
         else:
             self.create_subscription(String, topics.TOWEL_TRACKS, self._on_tracks, 10)
-            self.create_subscription(String, topics.EVENTS, self._on_event, 20)
 
         # Primary held-state source in both modes: the FE publishes this on every
         # grasp change from the physics simulation (gripper-width + payload sensor).
         self.create_subscription(String, topics.HELD_OBJECT, self._on_held_object, 10)
+        # ARM_CONTACT must reach the FSM in both modes too — arm-vs-wall
+        # detection is independent of localization mode (was previously only
+        # wired in perception mode, silently dropped under the GT default).
+        self.create_subscription(String, topics.EVENTS, self._on_event, 20)
 
         self.create_timer(0.2, self._tick)
         self.get_logger().info(
@@ -208,9 +216,13 @@ class MissionExecutorNode(Node):
             pass
 
     def _on_held_object(self, msg: String) -> None:
-        """Primary held-state source (both GT and perception modes).
-        Published by the FE whenever the gripper acquires or releases an item —
-        equivalent to a combined gripper-width + payload sensor."""
+        """Authoritative holding source (both modes): the gripper's own
+        grasp-state feedback, published by the FE on every grasp change. This
+        is the reliable "did my commanded grasp engage an object" signal a real
+        gripper controller reports. The wrist-load-cell force on /joint_states
+        (-> gripper_holding on /arm/state) is an INDEPENDENT force-based
+        confirmation sensor kept for telemetry/observability, not the primary
+        control gate."""
         try:
             data = json.loads(msg.data)
         except json.JSONDecodeError:
@@ -219,9 +231,17 @@ class MissionExecutorNode(Node):
         self._held_class = data.get("object_class")
 
     def _on_event(self, msg: String) -> None:
-        # Kept for future event logging/debugging; held-state is now driven by
-        # _on_held_object so no holding updates here.
-        pass
+        """ARM_CONTACT is the only event still processed here — held-state
+        comes from /robot/held_object (_on_held_object). A real servo stalls
+        on hard contact; this is the sensor edge telling the FSM to stop
+        pressing into whatever the forearm/gripper hit and abort the
+        in-flight PICK/DROP sequence (see MissionLogic._handle_arm_contact)."""
+        try:
+            event = json.loads(msg.data).get("event")
+        except json.JSONDecodeError:
+            return
+        if event == "ARM_CONTACT":
+            self._arm_contact_pending = True
 
     def _on_gt_objects(self, msg: String) -> None:
         try:
@@ -253,10 +273,17 @@ class MissionExecutorNode(Node):
         self._min_front = min(valid) if valid else None
 
     def _on_arm_state(self, msg: String) -> None:
+        """arm_status gates the pick/drop sequencing. gripper_holding (the
+        wrist-load-cell force-sensor confirmation, arm_controller thresholding
+        the payload weight on /joint_states) is recorded for telemetry in
+        /mission/state, but the authoritative holding gate is the gripper's own
+        grasp-state feedback on /robot/held_object (see _on_held_object)."""
         try:
-            self._arm_status = json.loads(msg.data).get("status", "IDLE")
+            data = json.loads(msg.data)
         except json.JSONDecodeError:
-            pass
+            return
+        self._arm_status = data.get("status", "IDLE")
+        self._gripper_holding_sensor = bool(data.get("gripper_holding", False))
 
     def _on_mode(self, msg: String) -> None:
         try:
@@ -326,7 +353,9 @@ class MissionExecutorNode(Node):
             nav_status=self._nav_status,
             min_front_obstacle=self._min_front,
             target_rel=self._target_rel(),
+            arm_contact=self._arm_contact_pending,
         ))
+        self._arm_contact_pending = False  # one-shot edge, consumed above
 
         if out.nav_cancel:
             self._pub_nav_cancel.publish(String(data=json.dumps({})))
@@ -349,6 +378,7 @@ class MissionExecutorNode(Node):
             "target_id": out.target_id or (self._logic.target or {}).get("id"),
             "holding": self._holding,
             "held_class": self._held_class,
+            "gripper_holding_sensor": self._gripper_holding_sensor,
             "towels_remaining": len(self._towels),
             "pose_source": self._pose_source,
             "nav_status": self._nav_status,

@@ -189,39 +189,51 @@ physics forces — the item tracks the arm exactly. On release, switch back to
 Visual feedback: mesh scale morphs on attach (`0.7×0.7×2.5`, bunched cloth)
 and restores on release (`1×1×1`, flat towel).
 
-## Gripper object tracking (what is held, not just whether held)
+## Grasp detection (what is held, and whether held)
+
+The arm must *know* it is carrying something rather than assume the grasp
+persists. This arm uses an edge slide/scoop grasp, **not** a two-finger pinch,
+so the standard parallel-jaw check (fingers stop at a non-zero width) has no
+analogue here — there is no jaw separation to read back. Methods reviewed:
 
 | Method | Signal | Cost | Decision |
 |---|---|---|---|
-| Gripper-width encoder | finger separation → size | already simulated | grasp trigger |
-| Force/torque at wrist | payload mass → class lookup | extra sensor | chassis impulse cosmetic |
+| Gripper-width encoder | finger separation → size | n/a for a scoop grasp | not applicable |
+| **Wrist load cell (force)** | axial force = payload weight (mass·g) | one F/T channel | **implemented** |
+| Shoulder joint torque | mass·g·(horizontal lever) | motor-current sensing | **rejected** — vanishes at the lifted pose |
 | Wrist camera + DNN | direct visual ID | extra hardware + ML | out of scope |
-| **Gripper payload topic** | physics GT as sensor output | free in sim | **implemented** |
-
-`/robot/held_object` (std_msgs/String JSON) published by FE on every grasp
-change: `{held, object_id, object_class, position}`. Simulates a combined
-gripper-width + force sensor. Mission node subscribes in both GT and perception
-modes as the single source for `self._holding` + `self._held_class`, replacing
-event-based tracking that had race conditions on OBJECT_BINNED.
-
-## Grasp detection (gripper presence sensing)
-
-The arm must *know* what it is gripping rather than assume the grasp persists —
-otherwise a towel knocked loose against a wall leaves the arm reporting a
-phantom hold. Reviewed methods for a parallel-jaw gripper:
-
-| Method | Signal | Cost | Used here |
-|---|---|---|---|
-| **Gripper-width / position feedback** | fingers stop at a non-zero width on an object vs. fully closed when empty | encoder already present | **yes** — the standard production-gripper check (Robotiq, Franka Hand) |
-| Object presence in grasp volume | held body stays within the grasp radius of the fingertip | geometric, free in sim | **yes**, combined with width |
 | Tactile / GelSight | contact force + slip + shape | dedicated sensor + DNN | overkill for a rigid-box towel |
-| Motor current / effort threshold | grip current rises on contact | effort sensing | alternative, not needed |
 
-Implementation (`frontend/src/robot/arm.js _verifyGrasp`): each tick, the grasp
-is held iff the gripper servo is in the closed range **and** the grasped body is
-within the grasp volume; otherwise the FE emits `GRASP_LOST`, removes the joint,
-and the mission/HUD drop the hold. This is the width + presence check above,
-continuously evaluated. Sources:
+Why the wrist load cell and not shoulder torque: gravitational torque about the
+shoulder is `mass·g·(horizontal lever arm)`, which **genuinely goes to zero**
+when the arm lifts the payload near-vertical — exactly the PICK_LIFT pose every
+pick ends in — so it is a useless presence sensor there (verified live: the
+signal collapsed to 0 while still holding). A wrist-mounted load cell measures
+the payload's weight as an axial force, `mass·g`, **independent of arm pose** —
+the honest, robust signal.
+
+Two complementary signals, with a deliberate split between the authoritative
+control gate and an independent confirmation sensor:
+
+- **Gripper grasp-state feedback** (`/robot/held_object`, FE on grasp change):
+  the gripper controller's own knowledge of whether a commanded close engaged an
+  object within the grasp volume (the FE's width + presence grasp detection).
+  This is the **authoritative holding gate** the mission FSM acts on in both
+  modes — reliable and immediate, exactly what a real gripper's grasp-success
+  flag provides.
+- **Wrist load cell** (`frontend/src/robot/arm.js _updateEffort` →
+  `/joint_states` wrist effort → `arm_protocol.py observe_effort` threshold →
+  `gripper_holding` on `/arm/state`): an INDEPENDENT force-based confirmation
+  measuring the payload weight `mass·g` (N), pose-independent. Carried in
+  `/mission/state.gripper_holding_sensor` for telemetry/observability. It is a
+  confirmation sensor, not the primary gate — keeping the control loop reliant
+  on the direct grasp-state feedback avoids coupling delivery to the debounced
+  force pipeline. (History: an earlier revision gated the mission on
+  `gripper_holding` directly; that regressed the pick-and-deliver acceptance
+  test because a real grasp whose force signal had not yet latched was scored as
+  a failed pick. The two-signal split above is the fix.)
+
+Sources:
 [soft gripper object recognition + force control](https://www.researchgate.net/publication/366613039_A_Sensory_Soft_Robotic_Gripper_Capable_of_Learning-Based_Object_Recognition_and_Force-Controlled_Grasping),
 [GelSight tactile sensing for grasp/slip](https://arxiv.org/pdf/1708.00922),
 [slip detection for grip-force optimization](https://arxiv.org/pdf/2202.06140).

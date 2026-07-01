@@ -73,3 +73,11 @@ class TestDerived:
         b = NavGrid.from_file(LAYOUT)
         assert np.array_equal(a.planner_grid, b.planner_grid)
         assert np.array_equal(a.field_grid, b.field_grid)
+
+    def test_is_lethal_matches_planner_grid(self, grid):
+        assert grid.is_lethal(0.0, 4.96) is True    # outer wall
+        assert grid.is_lethal(0.0, -3.6) is False   # robot spawn, corridor
+        assert grid.is_lethal(-3.5, -3.8) is True   # pool keepout
+
+    def test_is_lethal_out_of_bounds_is_false(self, grid):
+        assert grid.is_lethal(1e6, 1e6) is False

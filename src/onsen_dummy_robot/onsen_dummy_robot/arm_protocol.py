@@ -25,6 +25,17 @@ GRIPPER = 5
 
 HOME_POSE = [90.0, 90.0, 90.0, 90.0, 90.0, 70.0]
 
+# gripper_holding derivation: this arm uses an edge slide/scoop grasp (see
+# robot_design.md), not a two-finger pinch, so there is no jaw-width signal to
+# read back — the honest equivalent is the wrist load cell's axial force, i.e.
+# the WEIGHT of the payload (mass * g). Pose-independent: a 0.25 kg towel reads
+# ~2.45 N whether the arm is extended or lifted vertical (shoulder torque would
+# collapse to 0 in the lifted pose — see arm.js _updateEffort). An empty gripper
+# reads ~0. The threshold sits well below the lightest payload's weight with
+# headroom, and the debounce absorbs a single stale/startup reading.
+EFFORT_HOLD_THRESHOLD_N = 0.5
+EFFORT_HOLD_DEBOUNCE_S = 0.3
+
 # Pose table tuned against the simulator FK (shared/robot_spec.json: joint_ratio
 # 1.5, links 0.25/0.25/0.20 m, shoulder at z=0.50). PICK_SCOOP puts the
 # fingertip ~4 cm above the floor 0.41 m ahead of the arm base; DROP_BASKET
@@ -85,6 +96,9 @@ class ArmFirmware:
         self._stopped = False
         self._relaxed = [False] * NUM_JOINTS
         self._last_action = "HOME"
+        self._payload_force = 0.0
+        self._holding_since: float | None = None
+        self._holding = False
         if cal_path and os.path.exists(cal_path):
             self._load_cal()
 
@@ -108,6 +122,8 @@ class ArmFirmware:
             "relaxed": [i for i, r in enumerate(self._relaxed) if r],
             "last_action": self._last_action,
             "queue_depth": len(self._segments),
+            "gripper_holding": self._holding,
+            "payload_force_n": round(self._payload_force, 3),
         }
 
     # ── Tick ──────────────────────────────────────────────────────────────────
@@ -127,6 +143,23 @@ class ArmFirmware:
             if self._segments:
                 self._seg_start_pos = list(self._pos)
                 self._seg_start_t = now
+
+    def observe_effort(self, payload_force_n: float, now: float | None = None) -> None:
+        """Feed back the measured wrist load-cell force (N) — a real firmware
+        reading its own force-sensing channel = the weight of the payload.
+        Debounced threshold crossing derives gripper_holding, the honest signal
+        for 'am I carrying something' for this grasp strategy (pose-independent,
+        see EFFORT_HOLD_THRESHOLD_N and arm.js _updateEffort)."""
+        now = time.monotonic() if now is None else now
+        self._payload_force = payload_force_n
+        bearing_load = payload_force_n > EFFORT_HOLD_THRESHOLD_N
+        if not bearing_load:
+            self._holding_since = None
+            self._holding = False
+            return
+        if self._holding_since is None:
+            self._holding_since = now
+        self._holding = (now - self._holding_since) >= EFFORT_HOLD_DEBOUNCE_S
 
     # ── Command handling ──────────────────────────────────────────────────────
 

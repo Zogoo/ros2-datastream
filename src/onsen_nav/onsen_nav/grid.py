@@ -56,6 +56,15 @@ class NavGrid:
     def in_bounds(self, row: int, col: int) -> bool:
         return 0 <= row < self.height and 0 <= col < self.width
 
+    def is_lethal(self, x: float, y: float) -> bool:
+        """True when (x, y) falls on a mapped obstacle (wall/prop/bin/pool
+        keepout) in the planner grid. Lets a caller distinguish a lidar return
+        that coincides with a wall the planner already routed around from a
+        genuinely unmapped/dynamic obstacle (a towel, a person) — see
+        nav_server_node's front-sector obstacle gate."""
+        row, col = self.world_to_cell(x, y)
+        return self.in_bounds(row, col) and bool(self.planner_grid[row, col] == LETHAL)
+
     # ── rasterization ─────────────────────────────────────────────────────────
 
     def _blank(self) -> np.ndarray:
