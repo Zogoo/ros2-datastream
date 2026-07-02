@@ -26,6 +26,7 @@ Names live in exactly two mirrored registries:
 | `/ground_truth/objects` | `std_msgs/String` JSON | 5 Hz | true object states for labeling/eval |
 | `/sim/status` | `std_msgs/String` JSON | 1 Hz | `{alive, session_id, sim_time, fps}` heartbeat; `session_id` change = FE restart (see SessionWatch) |
 | `/robot/held_object` | `std_msgs/String` JSON | on change | `{held, object_id, object_class, position}` — gripper payload sensor |
+| `/robot/bin_load` | `std_msgs/String` JSON | 2 Hz | `{kg, count, tilt_deg}` — collect-bin load cell (strain gauge + HX711); base firmware thresholds into `bin_full` |
 
 ## Control
 

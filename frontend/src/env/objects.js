@@ -147,7 +147,9 @@ export class ObjectManager {
     return best;
   }
 
-  groundTruth() {
+  /** inBasket: optional predicate (worldPos -> bool) marking objects riding
+   *  in the robot's own collect bin, so the mission doesn't re-target them. */
+  groundTruth(inBasket = null) {
     return this.items.map((item) => {
       const p = item.body.translation();
       return {
@@ -157,6 +159,7 @@ export class ObjectManager {
         held: item.held,
         binned: item.binned,
         pickable: item.pickable,
+        in_basket: inBasket ? inBasket(p) : false,
       };
     });
   }
@@ -171,6 +174,12 @@ export class ObjectManager {
       }
       item.held = false;
       item.binned = null;
+      // Un-crumple: restore the flat cloth shape a grasp permanently bunched.
+      if (item.crumpled && item.flatHalfExtents) {
+        item.collider.setHalfExtents(item.flatHalfExtents);
+        item.mesh.scale.set(1, 1, 1);
+        item.crumpled = false;
+      }
       item.body.setBodyType(this.physics.R.RigidBodyType.Dynamic, true);
       item.body.setTranslation({ x: item.spawn[0], y: item.spawn[1], z: item.spawn[2] }, true);
       item.body.setRotation({ w: 1, x: 0, y: 0, z: 0 }, true);

@@ -189,6 +189,35 @@ physics forces — the item tracks the arm exactly. On release, switch back to
 Visual feedback: mesh scale morphs on attach (`0.7×0.7×2.5`, bunched cloth)
 and restores on release (`1×1×1`, flat towel).
 
+## Bumper recovery (Roomba behavior, with a map)
+
+iRobot's coverage robots amplify small impacts through a swing-arm bumper and
+escape with back-up -> rotate -> arc-forward (patent US8272092). Our contact
+skirt already publishes chassis hits with impulse on `/robot/contacts` — the
+sensor equivalent. nav_server treats any chassis contact >= 0.3 Ns during an
+active goal as ground truth that the world disagrees with the plan: escape
+opposite the last commanded direction (1.2 s at 0.10 m/s), then **replan A***
+from the escaped pose — strictly better than the random arc, because we have
+the map. >2 bumps on one goal -> the goal fails and the mission's retry/park
+logic takes over. Before this, a physical wedge just ran out the 8 s blocked
+timer ("robot hits object and loses navigation").
+
+## Collect bin: load cell + tilt dump (open hardware)
+
+Load sensing: single-point strain-gauge load cell + HX711 24-bit amplifier —
+the de-facto open-source weighing stack (~$3-5, stock Arduino `HX711`
+library). The FE publishes the physically-contained mass (+noise, 2 Hz) on
+`/robot/bin_load`; the base firmware debounces a 0.45 kg threshold (2 towels)
+into `bin_full`. Weight is the honest full-signal for a fixed payload class;
+an IR rim break-beam is the upgrade path for bulky-light loads.
+Dump mechanism: servo-tilted hopper hinged at the outboard-bottom edge — the
+pattern used by open-source collector robots (MG995-class servo, collect N
+then dump). One extra bus servo on the arm's UART chain (ID 7), `BIN DUMP` /
+`BIN HOME` protocol lines, open-loop travel time + load-cell confirmation.
+Sources: randomnerdtutorials.com/arduino-load-cell-hx711, circuitdigest.com
+weight-measurement build, utkuolcar.com garbage-collector robot, JETIR2205491
+autonomous collector.
+
 ## Grasp detection (what is held, and whether held)
 
 The arm must *know* it is carrying something rather than assume the grasp

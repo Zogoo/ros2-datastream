@@ -51,7 +51,10 @@ LATCHED_QOS = QoSProfile(
 )
 
 LAYOUT_PATH = os.environ.get("ONSEN_LAYOUT_PATH", "/ros2_ws/shared/onsen_layout.json")
-ROBOT_RADIUS = 0.30          # half-width 0.26 + clearance
+# Planner footprint: the collect bin overhangs to 0.34 m laterally / 0.41 m at
+# the front-left corner. 0.36 covers translation along the path with margin;
+# the (rarer) rotate-in-place near a corner is backstopped by bumper recovery.
+ROBOT_RADIUS = 0.36
 YAW_TOLERANCE = 0.10
 BLOCKED_FAIL_S = 8.0
 BLOCKED_RECOVER_S = 3.0      # blocked this long -> try one recovery before giving up
@@ -59,6 +62,13 @@ RECOVER_BACKUP_S = 1.0
 RECOVER_BACKUP_V = -0.08
 POSE_STALE_S = 1.5
 TICK_HZ = 10.0
+# Bumper (Roomba-style): the contact skirt reports chassis hits on
+# /robot/contacts; while a goal is active any such bump triggers an immediate
+# escape (back away from the contacted side, replan from the new pose).
+BUMP_MIN_IMPULSE = 0.3       # Ns; ignore feather brushes
+BUMP_BACKUP_S = 1.2
+BUMP_BACKUP_V = 0.10         # m/s magnitude; sign from the contacted side
+MAX_BUMPS_PER_GOAL = 2       # third bump on one goal -> fail (mission re-plans)
 
 
 class NavServerNode(Node):
@@ -78,6 +88,9 @@ class NavServerNode(Node):
         # enough to add without a new dependency.
         self._recovering_until: float | None = None
         self._recovered_once = False
+        self._recover_v = RECOVER_BACKUP_V  # escape velocity of the active recovery
+        self._bumps = 0                      # bumper hits on the current goal
+        self._last_cmd_vx = 0.0              # sign picks the bumper-escape direction
 
         self._pose: tuple[float, float, float] | None = None
         self._pose_at = 0.0
@@ -100,6 +113,7 @@ class NavServerNode(Node):
         self.create_subscription(LaserScan, topics.SCAN_LOW, self._on_scan_low, SENSOR_QOS)
         self.create_subscription(String, topics.CONTROL_MODE, self._on_mode, 10)
         self.create_subscription(Bool, topics.SAFETY_STOP, self._on_safety, 10)
+        self.create_subscription(String, topics.CONTACTS, self._on_contact, 20)
 
         self._publish_map()
         self.create_timer(1.0 / TICK_HZ, self._tick)
@@ -128,6 +142,7 @@ class NavServerNode(Node):
         self._blocked_since = None
         self._recovering_until = None
         self._recovered_once = False
+        self._bumps = 0
 
     def _on_cancel(self, _msg: String) -> None:
         if self._state == "active":
@@ -190,6 +205,41 @@ class NavServerNode(Node):
         if self._safety and self._state == "active":
             self._finish("failed")
 
+    def _on_contact(self, msg: String) -> None:
+        """Bumper escape (the Roomba behavior, with a map): a physical chassis
+        hit while navigating means the world disagrees with the plan — back
+        away from the hit (opposite the last commanded direction), then replan
+        A* from the escaped pose. Repeated bumps on one goal fail it so the
+        mission's retry/park logic takes over. Without this, the tracker kept
+        pushing against the obstacle until the blocked timer expired, or wedged
+        entirely — 'robot hits object and loses navigation'."""
+        if self._state != "active":
+            return
+        try:
+            contact = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if not str(contact.get("part", "")).startswith("chassis"):
+            return
+        if float(contact.get("impulse", 0.0) or 0.0) < BUMP_MIN_IMPULSE:
+            return
+        self._bumps += 1
+        if self._bumps > MAX_BUMPS_PER_GOAL:
+            self.get_logger().warning(
+                f"Bumper: {self._bumps} hits on goal {(self._goal or {}).get('goal_id')} — failing",
+            )
+            self._finish("failed")
+            return
+        # Escape opposite the direction we were driving when we hit.
+        self._recover_v = -BUMP_BACKUP_V if self._last_cmd_vx >= 0 else BUMP_BACKUP_V
+        self._recovering_until = self._now() + BUMP_BACKUP_S
+        self._path = None            # replan from the escaped pose
+        self._blocked_since = None
+        self.get_logger().info(
+            f"Bumper hit ({contact.get('object_id')}) — "
+            f"escaping {self._recover_v:+.2f} m/s, replanning",
+        )
+
     # ── control loop ──────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
@@ -201,10 +251,11 @@ class NavServerNode(Node):
         now = self._now()
         if self._recovering_until is not None:
             if now < self._recovering_until:
-                self._publish_twist(RECOVER_BACKUP_V, 0.0)
+                self._publish_twist(self._recover_v, 0.0)
                 return
-            # Backup finished — force a fresh plan from the backed-up pose.
+            # Escape finished — force a fresh plan from the escaped pose.
             self._recovering_until = None
+            self._recover_v = RECOVER_BACKUP_V
             self._path = None
             self._blocked_since = None
 
@@ -231,8 +282,9 @@ class NavServerNode(Node):
                 # escape maneuver first.
                 if not self._recovered_once and elapsed > BLOCKED_RECOVER_S:
                     self._recovered_once = True
+                    self._recover_v = RECOVER_BACKUP_V
                     self._recovering_until = now + RECOVER_BACKUP_S
-                    self._publish_twist(RECOVER_BACKUP_V, 0.0)
+                    self._publish_twist(self._recover_v, 0.0)
                     return
                 if elapsed > BLOCKED_FAIL_S:
                     self._finish("failed")
@@ -280,6 +332,8 @@ class NavServerNode(Node):
         self._blocked_since = None
         self._recovering_until = None
         self._recovered_once = False
+        self._recover_v = RECOVER_BACKUP_V
+        self._bumps = 0
         self._publish_twist(0.0, 0.0)
         self._publish_status()
 
@@ -288,6 +342,7 @@ class NavServerNode(Node):
     def _publish_twist(self, vx: float, wz: float) -> None:
         if self._safety or self._mode != "auto":
             return
+        self._last_cmd_vx = float(vx)
         twist = Twist()
         twist.linear.x = float(vx)
         twist.angular.z = float(wz)

@@ -86,9 +86,11 @@ def _towel_bin_center() -> tuple[float, float]:
 # The scoop overshoots slightly past the towel; the reach line is probed to
 # this far beyond the towel center. Matches the fingertip travel of PICK_SCOOP.
 REACH_OVERSHOOT_M = 0.15
-# The robot must be able to stand at the standoff: same footprint radius the
-# nav server plans with (nav_server_node.ROBOT_RADIUS).
-STANDOFF_ROBOT_RADIUS = 0.30
+# The robot must be able to stand at the standoff: MUST equal the footprint
+# radius the nav server plans with (nav_server_node.ROBOT_RADIUS) — a smaller
+# value here approves wall-adjacent standoffs the planner can never reach,
+# deadlocking APPROACH on an unplannable goal.
+STANDOFF_ROBOT_RADIUS = 0.36
 
 
 def _make_reach_clear():
@@ -163,6 +165,8 @@ class MissionExecutorNode(Node):
         self._holding = False
         self._held_class: str | None = None  # object class currently in gripper
         self._gripper_holding_sensor = False  # wrist-load-cell confirmation (telemetry)
+        self._bin_kg = 0.0        # collect-bin load cell (from /base/state)
+        self._bin_full = False
         self._arm_status = "IDLE"
         self._mode = "auto"
         self._safety = False
@@ -174,6 +178,7 @@ class MissionExecutorNode(Node):
 
         self._pub_twist = self.create_publisher(Twist, topics.CMD_VEL_AUTO, 10)
         self._pub_arm = self.create_publisher(String, topics.ARM_COMMAND, 10)
+        self._pub_base = self.create_publisher(String, topics.BASE_COMMAND, 10)
         self._pub_state = self.create_publisher(String, topics.MISSION_STATE, 10)
         self._pub_nav_goal = self.create_publisher(String, topics.NAV_GOAL, 10)
         self._pub_nav_cancel = self.create_publisher(String, topics.NAV_CANCEL, 10)
@@ -203,6 +208,9 @@ class MissionExecutorNode(Node):
         # detection is independent of localization mode (was previously only
         # wired in perception mode, silently dropped under the GT default).
         self.create_subscription(String, topics.EVENTS, self._on_event, 20)
+        # Collect-bin load-cell channel: the base firmware thresholds the
+        # HX711 weight into bin_full and reports both on /base/state.
+        self.create_subscription(String, topics.BASE_STATE, self._on_base_state, 10)
 
         self.create_timer(0.2, self._tick)
         self.get_logger().info(
@@ -295,15 +303,26 @@ class MissionExecutorNode(Node):
         if event == "ARM_CONTACT":
             self._arm_contact_pending = True
 
+    def _on_base_state(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._bin_kg = float(data.get("bin_kg", 0.0) or 0.0)
+        self._bin_full = bool(data.get("bin_full", False))
+
     def _on_gt_objects(self, msg: String) -> None:
         try:
             objects = json.loads(msg.data).get("objects", [])
         except json.JSONDecodeError:
             return
         # Only update towel targets; held-state comes from /robot/held_object.
+        # in_basket towels are riding in the robot's own collect bin — they are
+        # cargo, not targets.
         self._towels = [
             o for o in objects
-            if o.get("class") == "towel" and not o.get("binned") and not o.get("held")
+            if o.get("class") == "towel" and not o.get("binned")
+            and not o.get("held") and not o.get("in_basket")
         ]
 
     # ── Other inputs ────────────────────────────────────────────────────────────
@@ -406,6 +425,8 @@ class MissionExecutorNode(Node):
             min_front_obstacle=self._min_front,
             target_rel=self._target_rel(),
             arm_contact=self._arm_contact_pending,
+            bin_kg=self._bin_kg,
+            bin_full=self._bin_full,
         ))
         self._arm_contact_pending = False  # one-shot edge, consumed above
 
@@ -423,6 +444,8 @@ class MissionExecutorNode(Node):
             self._pub_twist.publish(twist)
         if out.arm_command:
             self._pub_arm.publish(String(data=out.arm_command))
+        if out.base_command:
+            self._pub_base.publish(String(data=out.base_command))
 
         self._pub_state.publish(String(data=json.dumps({
             "state": out.state,
@@ -431,6 +454,8 @@ class MissionExecutorNode(Node):
             "holding": self._holding,
             "held_class": self._held_class,
             "gripper_holding_sensor": self._gripper_holding_sensor,
+            "bin_kg": self._bin_kg,
+            "bin_full": self._bin_full,
             "towels_remaining": len(self._towels),
             "pose_source": self._pose_source,
             "nav_status": self._nav_status,

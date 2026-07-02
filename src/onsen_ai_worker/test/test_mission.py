@@ -11,13 +11,19 @@ import math
 import pytest
 
 from onsen_ai_worker.mission import (
-    DROP_SEQUENCE,
+    DUMP_HOME_TICKS,
+    DUMP_TILT_TICKS,
     GLOBAL_FAIL_LIMIT,
     MAX_APPROACH_RETRIES,
     MAX_PICK_ATTEMPTS,
+    MAX_UNLOAD_CYCLES,
+    NAV_LIMBO_TICKS,
+    NAV_LIMBO_TICKS,
     PICK_SEQUENCE,
     PICK_TOL_X,
     SCOOP_FORWARD,
+    STOW_SEQUENCE,
+    UNLOAD_CYCLE,
     MissionInput,
     MissionLogic,
     MissionOutput,
@@ -33,12 +39,13 @@ def towel(x, y, tid="towel_1"):
 def make_input(
     pose, towels=(), holding=False, arm_status="IDLE",
     safety_stop=False, mode="auto", nav_status="idle", min_front=None,
-    target_rel=None, arm_contact=False,
+    target_rel=None, arm_contact=False, bin_kg=0.0, bin_full=False,
 ):
     return MissionInput(
         pose=pose, towels=list(towels), holding=holding, arm_status=arm_status,
         safety_stop=safety_stop, mode=mode, nav_status=nav_status,
         min_front_obstacle=min_front, target_rel=target_rel, arm_contact=arm_contact,
+        bin_kg=bin_kg, bin_full=bin_full,
     )
 
 
@@ -126,6 +133,26 @@ class TestApproachNavProtocol:
                 break
         assert gave_up, "exhausted retries must release the target back to SEARCH"
 
+    def test_plan_time_failure_without_active_still_retries(self):
+        """Regression: a goal that fails AT PLAN TIME (unreachable standoff)
+        publishes 'failed' without the mission ever sampling 'active'; the
+        _was_active stale-status guard then ignored it forever — the FSM sat
+        in 'navigating' limbo for good. Sustained terminal status must count
+        as a failure after a few ticks."""
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "SEARCH"
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        towels = [towel(3.0, 0.0)]
+        logic.update(make_input(pose, towels))          # SEARCH -> APPROACH
+        logic.update(make_input(pose, towels))          # emits goal
+        retried = False
+        for _ in range(NAV_LIMBO_TICKS + 2):
+            out = logic.update(make_input(pose, towels, nav_status="failed"))
+            if "retry" in out.reason:
+                retried = True
+                break
+        assert retried, "sustained plan-time failure must trigger the retry path"
+
     def test_target_lost_cancels_nav(self):
         logic = MissionLogic(BIN_CENTER)
         logic.state = "SEARCH"
@@ -201,10 +228,19 @@ class TestWallAwareStandoff:
         # and the goal yaw still faces the towel from the standoff
         assert math.isclose(gyaw, math.atan2(0.0 - gy, 3.0 - gx), abs_tol=0.05)
 
-    def test_all_blocked_falls_back_to_natural(self):
-        gx, _gy, gyaw = self._first_goal(lambda _s, _t: False)
-        assert math.isclose(gx, 3.0 - SCOOP_FORWARD, abs_tol=0.02)
-        assert abs(gyaw) < 0.05
+    def test_all_blocked_parks_the_towel(self):
+        """Regression: when NO bearing has a standable, arm-clear standoff (a
+        towel in an alcove narrower than the footprint), the FSM used to fall
+        back to the doomed natural standoff and burn nav retries on it in a
+        loop, forever. It must park the towel and move on instead."""
+        logic = MissionLogic(BIN_CENTER, reach_clear=lambda _s, _t: False)
+        logic.state = "SEARCH"
+        logic.update(make_input(self.POSE, self.TOWELS))   # SEARCH -> APPROACH
+        out = logic.update(make_input(self.POSE, self.TOWELS))
+        assert out.nav_goal is None
+        assert "parked" in out.reason
+        assert logic.state == "SEARCH"
+        assert "towel_1" in logic._parked
 
 
 class TestAlignPick:
@@ -245,7 +281,7 @@ class TestPickSequence:
             if out.arm_command:
                 sent.append(out.arm_command)
                 logic.update(make_input(pose, towels, holding=holding, arm_status="MOVING"))
-            if logic.state not in ("PICK", "DROP"):
+            if logic.state != "PICK":
                 break
         return sent
 
@@ -254,7 +290,7 @@ class TestPickSequence:
         pose, towels = self._enter_pick(logic)
         sent = self._drain(logic, pose, towels, holding=True)
         assert sent == PICK_SEQUENCE
-        assert logic.state == "TO_BIN"
+        assert logic.state == "STOW", "grasped towel goes to the onboard bin, not the map bin"
 
     def test_grasp_failure_returns_to_search(self):
         logic = MissionLogic(BIN_CENTER)
@@ -302,38 +338,166 @@ class TestPickSequence:
 
 
 class TestDelivery:
-    def test_to_bin_navigates_then_aligns_then_drops(self):
+    def test_to_bin_navigates_then_aligns_then_unloads(self):
         logic = MissionLogic(BIN_CENTER)
         logic.state = "TO_BIN"
         pose = {"x": 0.0, "y": 0.0, "yaw": math.pi / 2}
 
-        first = logic.update(make_input(pose, holding=True))
+        first = logic.update(make_input(pose, bin_kg=0.5))
         assert first.nav_goal is not None, "TO_BIN must emit a nav goal"
         # play nav to success
         status = "active"
         for _ in range(8):
-            out = logic.update(make_input(pose, holding=True, nav_status=status))
+            out = logic.update(make_input(pose, bin_kg=0.5, nav_status=status))
             if logic.state != "TO_BIN":
                 break
             status = "succeeded"
         assert logic.state == "ALIGN_BIN"
 
-        # rotate to alignment -> DROP with the drop sequence queued
+        # rotate to alignment -> UNLOAD (arm empties the bin over the floor bin)
         apose = dict(pose)
         for _ in range(200):
-            out = logic.update(make_input(apose, holding=True))
+            out = logic.update(make_input(apose, bin_kg=0.5))
             if logic.state != "ALIGN_BIN":
                 break
             assert out.twist is not None
             apose["yaw"] += out.twist[1] * 0.1
-        assert logic.state == "DROP"
-        assert logic._seq.commands == DROP_SEQUENCE
+        assert logic.state == "UNLOAD"
 
-    def test_payload_lost_cancels_and_searches(self):
+    def _run_unload(self, logic, kg_per_cycle):
+        """Plays the arm through unload cycles. kg_per_cycle is the load-cell
+        reading BEFORE each successive cycle (simulating towels leaving)."""
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        sent = []
+        cycle = 0
+        kg = kg_per_cycle[0]
+        for _ in range(300):
+            out = logic.update(make_input(pose, bin_kg=kg))
+            if out.arm_command:
+                sent.append(out.arm_command)
+                logic.update(make_input(pose, bin_kg=kg, arm_status="MOVING"))
+                if out.arm_command == "A DROP_BIN_RELEASE":
+                    cycle += 1
+                    kg = kg_per_cycle[min(cycle, len(kg_per_cycle) - 1)]
+            if logic.state != "UNLOAD":
+                break
+        return sent
+
+    def test_unload_cycles_until_load_cell_reads_empty(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "UNLOAD"
+        logic._unload_cycles = 0
+        logic._unload_last_kg = None
+        sent = self._run_unload(logic, kg_per_cycle=[0.5, 0.25, 0.0])
+        # two full arm cycles, then HOME once the load cell reads empty
+        assert sent == [*UNLOAD_CYCLE, *UNLOAD_CYCLE, "A HOME"]
+        assert logic.state == "SEARCH"
+
+    def test_unload_stops_when_no_progress(self):
+        """A cycle that doesn't reduce the weight means the leftover towel is
+        outside the fixed BIN_PICK reach — carry it to the next trip instead
+        of looping the arm forever."""
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "UNLOAD"
+        logic._unload_cycles = 0
+        logic._unload_last_kg = None
+        sent = self._run_unload(logic, kg_per_cycle=[0.5, 0.5, 0.5])
+        assert sent == [*UNLOAD_CYCLE, "A HOME"], "one stalled cycle, then give up"
+        assert logic.state == "SEARCH"
+
+    def test_unload_cycle_cap(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "UNLOAD"
+        logic._unload_cycles = 0
+        logic._unload_last_kg = None
+        # weight decreases each cycle but never below the threshold
+        kgs = [2.0 - 0.25 * i for i in range(MAX_UNLOAD_CYCLES + 3)]
+        sent = self._run_unload(logic, kg_per_cycle=kgs)
+        assert sent.count("A BIN_PICK") == MAX_UNLOAD_CYCLES
+        assert logic.state == "SEARCH"
+
+    def test_empty_bin_cancels_delivery(self):
         logic = MissionLogic(BIN_CENTER)
         logic.state = "TO_BIN"
-        out = logic.update(make_input({"x": 0, "y": 0, "yaw": 0}, holding=False))
+        out = logic.update(make_input({"x": 0, "y": 0, "yaw": 0}, holding=False, bin_kg=0.0))
         assert out.nav_cancel is True
+        assert logic.state == "SEARCH"
+
+
+class TestBatchCollect:
+    """The collect-then-dump policy: stow each grasped towel in the onboard
+    bin, keep searching, deliver the batch when the load cell says full (or
+    nothing is left to pick)."""
+
+    POSE = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
+    def test_search_stows_a_held_towel_first(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "SEARCH"
+        logic.update(make_input(self.POSE, holding=True))
+        assert logic.state == "STOW"
+
+    def test_search_delivers_when_bin_full(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "SEARCH"
+        logic.update(make_input(self.POSE, [towel(2.0, 0.0)], bin_full=True, bin_kg=0.5))
+        assert logic.state == "TO_BIN", "a full bin outranks further picking"
+
+    def test_search_delivers_partial_batch_when_no_towels_left(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "SEARCH"
+        logic.update(make_input(self.POSE, [], bin_kg=0.25))
+        assert logic.state == "TO_BIN"
+
+    def test_search_keeps_scanning_with_empty_bin_and_no_towels(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "SEARCH"
+        out = logic.update(make_input(self.POSE, [], bin_kg=0.0))
+        assert logic.state == "SEARCH"
+        assert out.twist is not None
+
+    def _run_stow(self, logic, holding_after, bin_full=False, kg_after=0.25):
+        """Plays the arm through the stow sequence; holding flips to
+        holding_after and the load cell rises to kg_after once the release
+        command has been issued (kg_after=0 simulates a missed drop)."""
+        sent = []
+        holding = True
+        kg = 0.0
+        for _ in range(60):
+            out = logic.update(make_input(self.POSE, holding=holding,
+                                          bin_full=bin_full, bin_kg=kg))
+            if out.arm_command:
+                sent.append(out.arm_command)
+                if out.arm_command == "A DROP_RELEASE":
+                    holding = holding_after
+                    kg = kg_after
+                logic.update(make_input(self.POSE, holding=holding,
+                                        bin_full=bin_full, bin_kg=kg, arm_status="MOVING"))
+            if logic.state != "STOW":
+                break
+        return sent
+
+    def test_stow_sequence_then_back_to_search(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "STOW"
+        sent = self._run_stow(logic, holding_after=False)
+        assert sent == STOW_SEQUENCE
+        assert logic.state == "SEARCH", "bin not full — keep collecting"
+
+    def test_stow_full_bin_goes_to_delivery(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "STOW"
+        self._run_stow(logic, holding_after=False, bin_full=True)
+        assert logic.state == "TO_BIN"
+
+    def test_stow_missed_when_load_cell_sees_no_gain(self):
+        """The release opened the gripper but the bin never got heavier — the
+        towel fell OUTSIDE (this happened: drops past a too-small bin left the
+        robot 'collecting' nothing, forever). The load cell is the proof of
+        stow; without the gain the FSM must go re-acquire the towel."""
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "STOW"
+        self._run_stow(logic, holding_after=False, kg_after=0.0)
         assert logic.state == "SEARCH"
 
 
@@ -494,7 +658,7 @@ class TestDirectBaseLinkGrasp:
 
 class TestArmContact:
     """ARM_CONTACT = the forearm/gripper hit static geometry mid-sequence (a
-    real servo would stall). The FSM must abort in-flight PICK/DROP work
+    real servo would stall). The FSM must abort in-flight PICK/STOW work
     immediately instead of continuing to press into the obstacle."""
 
     def test_contact_while_picking_not_holding_aborts_and_homes(self):
@@ -508,14 +672,14 @@ class TestArmContact:
         assert logic.state == "SEARCH"
         assert logic._seq.commands == []
 
-    def test_contact_while_holding_retracts_and_continues_delivery(self):
+    def test_contact_while_holding_retracts_and_retries_stow(self):
         logic = MissionLogic(BIN_CENTER)
-        logic.state = "DROP"
-        logic._seq.commands = ["A DROP_BIN"]
+        logic.state = "STOW"
+        logic._seq.commands = ["A DROP_BASKET"]
         pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         out = logic.update(make_input(pose, [], holding=True, arm_contact=True))
         assert out.arm_command == "A HOME"
-        assert logic.state == "TO_BIN"
+        assert logic.state == "STOW"
 
     def test_contact_ignored_outside_pick_drop_states(self):
         logic = MissionLogic(BIN_CENTER)

@@ -4,16 +4,28 @@
     "frame": "base_link: X forward, Y left, Z up"
   },
   "chassis": {
-    "size": [0.62, 0.42, 0.14],
+    "size": [
+      0.62,
+      0.42,
+      0.14
+    ],
     "ground_clearance": 0.06,
     "mass": 14.0,
-    "cog_offset": [0.0, 0.0, -0.02],
+    "cog_offset": [
+      0.0,
+      0.0,
+      -0.02
+    ],
     "skirt_height": 0.08
   },
   "wheels": {
     "radius": 0.07,
     "width": 0.05,
-    "axle_x": [0.24, 0.0, -0.24],
+    "axle_x": [
+      0.24,
+      0.0,
+      -0.24
+    ],
     "track_width": 0.47,
     "max_radps": 12.0,
     "suspension": {
@@ -23,7 +35,11 @@
       "damping": 94.0,
       "attach_z": 0.03
     },
-    "friction": { "dry": 0.8, "wet": 0.45, "lateral_factor": 0.6 },
+    "friction": {
+      "dry": 0.8,
+      "wet": 0.45,
+      "lateral_factor": 0.6
+    },
     "drive_gain": 60.0,
     "servo_lag_tau_s": 0.08
   },
@@ -33,23 +49,55 @@
     "standoff_radius": 0.012
   },
   "basket": {
-    "center": [0.26, 0.26, 0.44],
-    "size": [0.20, 0.18, 0.12],
-    "rim_z": 0.50
+    "center": [
+      -0.095,
+      0.0,
+      0.47
+    ],
+    "size": [
+      0.37,
+      0.3,
+      0.22
+    ],
+    "rim_z": 0.58,
+    "wall_t": 0.015,
+    "hinge": "rear_top",
+    "dump_deg": 110,
+    "tilt_speed_dps": 90.0,
+    "load_cell": {
+      "full_kg": 0.7,
+      "noise_kg": 0.005
+    }
   },
   "arm": {
-    "base_offset": [0.26, 0.0, 0.44],
-    "shoulder_z": 0.50,
-    "links": { "upper": 0.25, "forearm": 0.25, "wrist": 0.20 },
+    "base_offset": [
+      0.26,
+      0.0,
+      0.44
+    ],
+    "shoulder_z": 0.5,
+    "links": {
+      "upper": 0.25,
+      "forearm": 0.25,
+      "wrist": 0.2
+    },
     "joint_ratio": 1.5,
     "max_joint_speed_dps": 200.0,
     "servo_lag_tau_s": 0.08,
-    "gripper": { "max_opening_m": 0.09, "grasp_radius_m": 0.14, "close_deg_threshold": 30.0 }
+    "gripper": {
+      "max_opening_m": 0.09,
+      "grasp_radius_m": 0.14,
+      "close_deg_threshold": 30.0
+    }
   },
   "sensors": {
     "lidar": {
       "frame_id": "laser_link",
-      "position": [-0.22, 0.0, 0.62],
+      "position": [
+        0.24,
+        -0.15,
+        0.62
+      ],
       "num_rays": 360,
       "hz": 8,
       "range_min": 0.15,
@@ -61,18 +109,34 @@
     },
     "camera_front": {
       "frame_id": "camera_front_link",
-      "position": [0.31, 0.0, 0.38],
+      "position": [
+        0.31,
+        0.0,
+        0.38
+      ],
       "pitch_deg": -15,
       "hfov_deg": 70,
       "width": 640,
       "height": 480,
       "hz": 5,
-      "jpeg_quality": { "low": 0.85, "medium": 0.7, "high": 0.55 },
-      "drop_prob": { "low": 0.01, "medium": 0.05, "high": 0.1 }
+      "jpeg_quality": {
+        "low": 0.85,
+        "medium": 0.7,
+        "high": 0.55
+      },
+      "drop_prob": {
+        "low": 0.01,
+        "medium": 0.05,
+        "high": 0.1
+      }
     },
     "camera_rear": {
       "frame_id": "camera_rear_link",
-      "position": [-0.31, 0.0, 0.38],
+      "position": [
+        -0.31,
+        0.0,
+        0.38
+      ],
       "yaw_deg": 180,
       "pitch_deg": -10,
       "hfov_deg": 70,
@@ -82,7 +146,11 @@
     },
     "camera_depth": {
       "frame_id": "camera_depth_link",
-      "position": [0.31, 0.0, 0.36],
+      "position": [
+        0.31,
+        0.0,
+        0.36
+      ],
       "pitch_deg": -20,
       "hfov_deg": 87,
       "width": 320,
@@ -95,9 +163,13 @@
     },
     "sonar": {
       "frame_prefix": "sonar_link_",
-      "height": 0.10,
+      "height": 0.1,
       "nose_x": 0.31,
-      "bearings_deg": [-25, 0, 25],
+      "bearings_deg": [
+        -25,
+        0,
+        25
+      ],
       "cone_half_angle_deg": 15,
       "rays_per_cone": 7,
       "range_min": 0.02,
@@ -107,14 +179,23 @@
     },
     "imu": {
       "frame_id": "imu_link",
-      "position": [0.05, 0.0, 0.18],
+      "position": [
+        0.05,
+        0.0,
+        0.18
+      ],
       "hz": 50,
       "gyro_noise_std": 0.002,
       "accel_noise_std": 0.05,
       "bias_walk_std": 0.0002
     },
-    "odom": { "hz": 20, "slip_factor": 1.0 },
-    "joint_states": { "hz": 20 }
+    "odom": {
+      "hz": 20,
+      "slip_factor": 1.0
+    },
+    "joint_states": {
+      "hz": 20
+    }
   },
   "safety": {
     "contact_impulse_stop_threshold": 3.0,

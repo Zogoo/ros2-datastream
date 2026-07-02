@@ -26,7 +26,7 @@ export class GroundTruthPublisher {
         data: JSON.stringify({
           frame: this.frame,
           timestamp: new Date().toISOString(),
-          objects: this.objects.groundTruth(),
+          objects: this.objects.groundTruth((p) => this.robot.binContains(p)),
         }),
       });
     }

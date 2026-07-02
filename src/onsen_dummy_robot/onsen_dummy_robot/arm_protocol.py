@@ -54,8 +54,17 @@ ACTIONS: dict[str, list[float] | None] = {
     "PICK_GRIP":     [90, 157, 57, 77, 90, 12],
     "PICK_LIFT":     [90, 110, 57, 77, 90, 12],
     "PICK_RETRACT":  [90, 95, 80, 70, 90, 12],
-    "DROP_BASKET":   [178, 100, 85, 85, 90, 12],
-    "DROP_RELEASE":  [178, 100, 85, 85, 90, 75],
+    # Collect-bin poses (spec basket: top-deck tray center [-0.095, 0], rim
+    # 0.58). The bin sits BEHIND the shoulder, so these use the chain's
+    # negative-radial reach: pan stays forward (90) and the arm arcs up and
+    # over its own shoulder. FK-solved, validated in kinematics.test.js.
+    # DROP_BASKET: fingertip (-0.071, 0, 0.661) — above the rim, over center.
+    "DROP_BASKET":   [90, 89, 135, 146, 90, 12],
+    "DROP_RELEASE":  [90, 89, 135, 146, 90, 75],
+    # BIN_PICK: fingertip (-0.073, 0, 0.419) — inside the bin, low over the
+    # stow pile, gripper open; CLOSE_GRIPPER then grasps a stowed towel for
+    # the arm-unload delivery cycle.
+    "BIN_PICK":      [90, 84, 169, 106, 90, 80],
     "DROP_BIN":      [178, 130, 73, 90, 90, 12],
     "DROP_BIN_RELEASE": [178, 130, 73, 90, 90, 75],
     "OPEN_GRIPPER":  None,

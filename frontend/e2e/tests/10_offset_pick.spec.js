@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { RosProbe, bootSim, setAuto, sleep } from '../helpers/ros.js';
+import { RosProbe, bootSim, setAuto, setManual, sleep } from '../helpers/ros.js';
 
 // Autonomy + analytic IK: a towel placed off the robot's centre line is picked
 // by panning the arm to the measured pose — a reach the canned centred
@@ -17,6 +17,10 @@ test('offset pick: IK reaches an off-axis towel that canned poses cannot', async
   // scenario 09 (water hazard) legitimately trips the tilt e-stop and runs
   // before this file, so clear it or the mission aborts to IDLE every tick.
   await probe.clearSafety();
+  // Hold MANUAL while staging: control mode defaults to auto, so the mission
+  // would otherwise lock a target from the pre-teleport spawn pose and chase
+  // it across the map instead of the staged towel.
+  await setManual(page);
   await sleep(4000); // localizer + tracker warm-up
 
   // robot facing north; towel offset to the right and ahead, within the

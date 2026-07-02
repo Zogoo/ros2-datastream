@@ -97,6 +97,10 @@ async function boot() {
   ros.subscribeJson(TOPICS.baseWheelTargets, (m) => {
     if (Array.isArray(m.w)) robot.suspension.setTargets(m.w);
   });
+  // Dump-servo target from the base firmware; the FE applies servo dynamics.
+  ros.subscribeJson(TOPICS.baseState, (m) => {
+    if (m.bin_tilt_target_deg !== undefined) robot.setBinTiltTarget(m.bin_tilt_target_deg);
+  });
   ros.subscribe(TOPICS.safetyStop, (m) => {
     robot.safetyStop = !!m.data;
   });
@@ -116,6 +120,7 @@ async function boot() {
   let lastFrame = performance.now();
   const dt = 1 / config.physicsHz;
   let _prevHeldId = null;  // tracks last-published held_object id to publish only on change
+  let _binLoadAccum = 0;   // 2 Hz cadence for the bin load-cell reading
 
   function frame(now) {
     const frameDelta = now - lastFrame;
@@ -155,6 +160,23 @@ async function boot() {
         data: JSON.stringify({ ...event, timestamp: new Date().toISOString() }),
       });
       hud.ticker(`${event.event} ${event.object_id}`);
+    }
+
+    // Bin load cell (strain gauge + HX711 on the real robot): total weight of
+    // whatever rests in the collect bin, published at the HX711-ish 2 Hz with
+    // sensor noise. The base firmware thresholds this into bin_full.
+    _binLoadAccum += renderDt;
+    if (_binLoadAccum >= 0.5) {
+      _binLoadAccum %= 0.5;
+      const load = robot.binLoad();
+      const noise = (Math.random() - 0.5) * 2 * (spec.basket.load_cell?.noise_kg ?? 0.005);
+      ros.publish(TOPICS.binLoad, {
+        data: JSON.stringify({
+          kg: Math.max(0, Math.round((load.kg + noise) * 1000) / 1000),
+          count: load.count,
+          tilt_deg: Math.round(robot.binTilt),
+        }),
+      });
     }
 
     // Publish held-object state whenever the held item changes.

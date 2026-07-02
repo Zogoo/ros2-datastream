@@ -4,6 +4,10 @@ from __future__ import annotations
 import math
 
 from onsen_dummy_robot.base_protocol import (
+    BIN_DUMP_DEG,
+    BIN_FULL_KG,
+    BIN_LOAD_DEBOUNCE_S,
+    BIN_TILT_SPEED_DPS,
     MAX_WHEEL_RADPS,
     TRACK_WIDTH,
     WHEEL_RADIUS,
@@ -92,3 +96,48 @@ class TestSpeedScale:
         assert parts[0] == "STATE"
         assert len(parts) == 10
         assert parts[-1] == "IDLE"
+
+
+class TestCollectBin:
+    def test_dump_and_home_interpolate_at_servo_speed(self):
+        fw = BaseFirmware()
+        assert fw.handle("BIN DUMP") == ["OK BIN DUMP"]
+        t0 = fw._bin_tilt_at
+        # halfway through the swing
+        half = BIN_DUMP_DEG / BIN_TILT_SPEED_DPS / 2
+        assert math.isclose(fw.bin_tilt(t0 + half), BIN_DUMP_DEG / 2, rel_tol=1e-6)
+        # fully dumped after the full travel time
+        assert fw.bin_tilt(t0 + 10.0) == BIN_DUMP_DEG
+        fw.handle("BIN HOME")
+        t1 = fw._bin_tilt_at
+        assert fw.bin_tilt(t1 + 10.0) == 0.0
+
+    def test_bin_full_debounces_load(self):
+        fw = BaseFirmware()
+        fw.observe_bin_load(BIN_FULL_KG + 0.1, now=0.0)
+        assert fw.state_dict()["bin_full"] is False, "single reading must not latch"
+        fw.observe_bin_load(BIN_FULL_KG + 0.1, now=BIN_LOAD_DEBOUNCE_S + 0.1)
+        assert fw.state_dict()["bin_full"] is True
+        # emptying the bin clears the latch immediately
+        fw.observe_bin_load(0.0, now=BIN_LOAD_DEBOUNCE_S + 0.2)
+        assert fw.state_dict()["bin_full"] is False
+
+    def test_light_load_never_fills(self):
+        fw = BaseFirmware()
+        for i in range(10):
+            fw.observe_bin_load(BIN_FULL_KG - 0.1, now=float(i))
+        assert fw.state_dict()["bin_full"] is False
+
+    def test_bin_query_reply(self):
+        fw = BaseFirmware()
+        fw.observe_bin_load(0.25, now=0.0)
+        reply = fw.handle("BIN Q")[0]
+        assert reply.startswith("BIN ")
+        assert "0.250" in reply
+
+    def test_state_dict_carries_bin_channel(self):
+        fw = BaseFirmware()
+        fw.handle("BIN DUMP")
+        s = fw.state_dict()
+        assert s["bin_tilt_target_deg"] == BIN_DUMP_DEG
+        assert "bin_kg" in s and "bin_full" in s

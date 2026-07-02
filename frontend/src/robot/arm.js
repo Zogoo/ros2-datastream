@@ -9,9 +9,12 @@ const HELD_GROUPS = groups(GROUP_OBJECT, 0);
 // Free props use the normal object filter so they rest on the floor.
 const FREE_GROUPS = groups(GROUP_OBJECT, OBJECT_FILTER);
 
-// Visual scale applied to a towel-class item while gripped (bunched cloth appearance).
-const GRIP_SCALE = new THREE.Vector3(0.70, 0.70, 2.5);
-const FREE_SCALE = new THREE.Vector3(1, 1, 1);
+// A grasped cloth bunches into a crumple and STAYS crumpled once handled —
+// applied to both the visual scale and the physics collider half-extents, so
+// a handled towel (0.195 x 0.143 x 0.081 m) fits the onboard collect bin in
+// any orientation (flat rigid towels would not). Reset restores flat.
+export const CRUMPLE_SCALE = { x: 0.65, y: 0.65, z: 1.8 };
+const GRIP_SCALE = new THREE.Vector3(CRUMPLE_SCALE.x, CRUMPLE_SCALE.y, CRUMPLE_SCALE.z);
 
 // Static-geometry kinds the arm can legitimately touch (the gripper brushes
 // the floor at the bottom of every scoop) vs. a genuine wall/prop/bin strike.
@@ -239,7 +242,20 @@ export class Arm {
     item.collider.setCollisionGroups(HELD_GROUPS);
     item.held = true;
     this.heldItem = item;
+    // Crumple the cloth: visual scale AND collider shape, kept after release
+    // (a handled towel stays bunched — this is what lets it fit the collect
+    // bin). ObjectManager.reset() restores the flat shape.
     item.mesh.scale.copy(GRIP_SCALE);
+    const shape = item.collider.shape;
+    if (!item.crumpled && shape.halfExtents) {
+      item.flatHalfExtents = { ...shape.halfExtents };
+      item.collider.setHalfExtents({
+        x: shape.halfExtents.x * CRUMPLE_SCALE.x,
+        y: shape.halfExtents.y * CRUMPLE_SCALE.y,
+        z: shape.halfExtents.z * CRUMPLE_SCALE.z,
+      });
+      item.crumpled = true;
+    }
     graspEvents.push({ event: 'GRASP_ACQUIRED', object_id: item.id, object_class: item.cls });
   }
 
@@ -285,7 +301,7 @@ export class Arm {
     item.collider.setCollisionGroups(FREE_GROUPS);
     item.held = false;
     item.body.setLinvel(releaseVel, true);
-    item.mesh.scale.copy(FREE_SCALE);
+    // Stays crumpled — see _attach.
     graspEvents.push({ event, object_id: item.id, object_class: item.cls });
   }
 
