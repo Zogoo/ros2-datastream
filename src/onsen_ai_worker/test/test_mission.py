@@ -165,6 +165,48 @@ class TestApproachNavProtocol:
         assert g2.nav_goal is None, "goal must not be re-issued from pose drift alone"
 
 
+class TestWallAwareStandoff:
+    """The reach_clear seam: a wall-adjacent towel must be approached from a
+    bearing whose arm sweep stays clear, instead of burning MAX_PICK_ATTEMPTS
+    aborted ARM_CONTACT sequences on the natural (anchor-direction) approach."""
+
+    POSE = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    TOWELS = [towel(3.0, 0.0)]
+
+    def _first_goal(self, reach_clear):
+        logic = MissionLogic(BIN_CENTER, reach_clear=reach_clear)
+        logic.state = "SEARCH"
+        logic.update(make_input(self.POSE, self.TOWELS))   # SEARCH -> APPROACH
+        out = logic.update(make_input(self.POSE, self.TOWELS))  # emits goal
+        assert out.nav_goal is not None
+        return out.nav_goal
+
+    def test_clear_reach_keeps_natural_standoff(self):
+        gx, gy, gyaw = self._first_goal(lambda _s, _t: True)
+        assert math.isclose(gx, 3.0 - SCOOP_FORWARD, abs_tol=0.02)
+        assert math.isclose(gy, 0.0, abs_tol=0.02)
+        assert abs(gyaw) < 0.05
+
+    def test_blocked_reach_rotates_approach(self):
+        # A "wall" east of the towel: any approach pointing east (bearing near
+        # 0 from the west anchor) is rejected; side approaches are accepted.
+        def reach_clear(standoff, towel_xy):
+            bearing = math.atan2(towel_xy[1] - standoff[1], towel_xy[0] - standoff[0])
+            return abs(math.cos(bearing)) < 0.5   # only near-perpendicular OK
+
+        gx, gy, gyaw = self._first_goal(reach_clear)
+        # standoff still SCOOP_FORWARD from the towel, but from a side bearing
+        assert math.isclose(math.hypot(3.0 - gx, 0.0 - gy), SCOOP_FORWARD, abs_tol=0.02)
+        assert abs(math.cos(gyaw)) < 0.5, "approach must have rotated off the blocked axis"
+        # and the goal yaw still faces the towel from the standoff
+        assert math.isclose(gyaw, math.atan2(0.0 - gy, 3.0 - gx), abs_tol=0.05)
+
+    def test_all_blocked_falls_back_to_natural(self):
+        gx, _gy, gyaw = self._first_goal(lambda _s, _t: False)
+        assert math.isclose(gx, 3.0 - SCOOP_FORWARD, abs_tol=0.02)
+        assert abs(gyaw) < 0.05
+
+
 class TestAlignPick:
     def _at_standoff(self):
         logic = MissionLogic(BIN_CENTER)

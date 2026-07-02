@@ -289,19 +289,25 @@ export class Arm {
     graspEvents.push({ event, object_id: item.id, object_class: item.cls });
   }
 
-  /** Small-ball probe at the item's center: true if it overlaps any static
-   *  world geometry other than the floor (which a released item legitimately
-   *  rests on/near). Item is still kinematic here, so this only needs to
-   *  answer the yes/no question — no penetration-depth math required. */
+  /** Small-ball probe at the item's center: true if it overlaps THICK static
+   *  geometry (walls, platforms, props) an ejected towel could be trapped
+   *  inside. Floor is excluded (a released item legitimately rests on it) and
+   *  so are bin walls: every DROP_BIN release hovers the towel right at the
+   *  2 cm-thin bin rim, which cannot trap it — a rim-straddling towel just
+   *  falls one way or the other once dynamic. Treating bin_wall as "embedded"
+   *  teleported the towel back over the robot at the exact moment of a bin
+   *  drop, making every delivery miss. Item is still kinematic here, so this
+   *  only answers yes/no — no penetration-depth math required. */
   _isEmbeddedInWalls(item) {
     const { R, world } = this.physics;
     const pos = item.body.translation();
+    const TRAPPING_KINDS = new Set(['wall', 'platform', 'prop']);
     let embedded = false;
     world.intersectionsWithShape(
       pos, { w: 1, x: 0, y: 0, z: 0 }, new R.Ball(0.05),
       (collider) => {
         const meta = this.physics.metaOf(collider.handle);
-        if (meta && meta.kind !== 'floor') {
+        if (meta && TRAPPING_KINDS.has(meta.kind)) {
           embedded = true;
           return false; // stop the query — one hit is enough
         }

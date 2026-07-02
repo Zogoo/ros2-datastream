@@ -20,6 +20,18 @@ from typing import Any
 # measured towel is outside the arm's reachable annulus.
 IkReach = Callable[[float, float], "str | None"]
 
+# (standoff_xy, towel_xy) -> True when the arm's reach line from a robot at
+# standoff_xy toward (and slightly past) the towel stays clear of static
+# geometry — i.e. the scoop will not press the fingertip into a wall. Injected
+# by the executor from the nav grid (same seam pattern as IkReach).
+ReachClear = Callable[[tuple[float, float], tuple[float, float]], bool]
+
+# Alternate approach bearings (rad, relative to the anchor direction) tried
+# when the direct standoff would sweep the arm into a wall. Ordered by how
+# little they deviate from the natural approach; a wall-adjacent towel is
+# typically picked by approaching parallel to the wall (±90°).
+APPROACH_BEARINGS = (0.0, 0.5, -0.5, 1.05, -1.05, 1.57, -1.57, 2.1, -2.1, 2.6, -2.6, 3.14)
+
 SCOOP_FORWARD = 0.667     # m, fingertip ahead of base center at PICK_SCOOP
 DROP_OFFSET = (0.28, 0.66)  # m, release point in base_link at DROP_BIN (pan 178, extended)
 PICK_TOL_X = 0.08
@@ -91,12 +103,17 @@ class MissionLogic:
         self,
         bin_center: tuple[float, float],
         ik_reach: IkReach | None = None,
+        reach_clear: ReachClear | None = None,
     ) -> None:
         self.bin_center = bin_center
         # ik_reach(rel_x, rel_y) -> firmware "J ..." line reaching that base_link
         # point at GRASP_Z, or None if unreachable. When unset, the canned
         # PICK_SCOOP pose is used (fixed 0.667 m ahead).
         self._ik_reach = ik_reach
+        # reach_clear(standoff_xy, towel_xy) -> arm sweep clear of walls from
+        # that standoff. When unset, the anchor-direction standoff is used
+        # unchecked (the reactive ARM_CONTACT abort still guards the sequence).
+        self._reach_clear = reach_clear
         self.state = "IDLE"
         self.target: dict[str, Any] | None = None
         self._seq = _SeqState()
@@ -298,9 +315,27 @@ class MissionLogic:
     def _standoff_goal(
         self, towel: dict[str, float], anchor: tuple[float, float],
     ) -> tuple[float, float, float]:
-        gx, gy = standoff_point((towel["x"], towel["y"]), anchor, SCOOP_FORWARD)
-        yaw = math.atan2(towel["y"] - gy, towel["x"] - gx)
-        return (gx, gy, yaw)
+        """Pick standoff, wall-aware when a reach_clear probe is injected.
+
+        The natural standoff (approach along the anchor->towel line) is used
+        when the arm's sweep from there is clear. For a wall-adjacent towel it
+        often is not — the scoop overshoots past the towel into the wall, and
+        without this check every such towel burned MAX_PICK_ATTEMPTS aborted
+        ARM_CONTACT sequences before being parked. Instead, scan alternate
+        approach bearings around the towel (least deviation first: a wall
+        towel is normally picked by approaching parallel to the wall) and take
+        the first standoff whose reach line is clear. If none is, fall back to
+        the natural one and let the reactive guards handle it."""
+        tx, ty = towel["x"], towel["y"]
+        base_bearing = math.atan2(ty - anchor[1], tx - anchor[0])
+        for delta in APPROACH_BEARINGS if self._reach_clear else (0.0,):
+            bearing = base_bearing + delta
+            gx = tx - math.cos(bearing) * SCOOP_FORWARD
+            gy = ty - math.sin(bearing) * SCOOP_FORWARD
+            if self._reach_clear is None or self._reach_clear((gx, gy), (tx, ty)):
+                return (gx, gy, bearing)
+        gx, gy = standoff_point((tx, ty), anchor, SCOOP_FORWARD)
+        return (gx, gy, base_bearing)
 
     def _build_pick_sequence(self, rel: tuple[float, float]) -> list[str]:
         """Replace the fixed PICK_SCOOP with an IK reach to the measured towel

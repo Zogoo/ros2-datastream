@@ -13,6 +13,10 @@ test('offset pick: IK reaches an off-axis towel that canned poses cannot', async
   probe.subscribe('/arm/command');
 
   await bootSim(page);
+  // The safety latch lives in the robot_state NODE and survives FE reloads —
+  // scenario 09 (water hazard) legitimately trips the tilt e-stop and runs
+  // before this file, so clear it or the mission aborts to IDLE every tick.
+  await probe.clearSafety();
   await sleep(4000); // localizer + tracker warm-up
 
   // robot facing north; towel offset to the right and ahead, within the

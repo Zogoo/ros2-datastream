@@ -83,6 +83,53 @@ def _towel_bin_center() -> tuple[float, float]:
         return (0.0, 4.45)
 
 
+# The scoop overshoots slightly past the towel; the reach line is probed to
+# this far beyond the towel center. Matches the fingertip travel of PICK_SCOOP.
+REACH_OVERSHOOT_M = 0.15
+# The robot must be able to stand at the standoff: same footprint radius the
+# nav server plans with (nav_server_node.ROBOT_RADIUS).
+STANDOFF_ROBOT_RADIUS = 0.30
+
+
+def _make_reach_clear():
+    """Wall-clearance probe for MissionLogic (the ReachClear seam): True when a
+    robot standing at standoff_xy can run the scoop toward towel_xy without the
+    arm sweeping into mapped static geometry. Two checks against the same
+    layout-rasterized grid the planner uses:
+      1. the standoff cell is free in the ROBOT_RADIUS-inflated grid (the
+         robot can physically stand and rotate there — otherwise the nav goal
+         would just fail and burn approach retries), and
+      2. the line from the standoff to REACH_OVERSHOOT_M past the towel has
+         line-of-sight on the raw grid (the fingertip path crosses no wall).
+    Returns None when the nav grid can't be built — the mission then uses the
+    unchecked anchor-direction standoff (reactive ARM_CONTACT still guards)."""
+    try:
+        from onsen_nav.astar import line_of_sight
+        from onsen_nav.grid import FREE, NavGrid
+    except ImportError:
+        return None
+    try:
+        grid = NavGrid.from_file(LAYOUT_PATH)
+    except (OSError, KeyError, json.JSONDecodeError):
+        return None
+    inflated = grid.inflated(STANDOFF_ROBOT_RADIUS)
+
+    def reach_clear(standoff: tuple[float, float], towel: tuple[float, float]) -> bool:
+        srow, scol = grid.world_to_cell(standoff[0], standoff[1])
+        if not grid.in_bounds(srow, scol) or inflated[srow, scol] != FREE:
+            return False
+        dx, dy = towel[0] - standoff[0], towel[1] - standoff[1]
+        d = math.hypot(dx, dy) or 1e-6
+        end_x = towel[0] + dx / d * REACH_OVERSHOOT_M
+        end_y = towel[1] + dy / d * REACH_OVERSHOOT_M
+        erow, ecol = grid.world_to_cell(end_x, end_y)
+        if not grid.in_bounds(erow, ecol):
+            return False
+        return line_of_sight(grid.planner_grid, (srow, scol), (erow, ecol))
+
+    return reach_clear
+
+
 def _yaw_from_quat(q) -> float:
     return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
 
@@ -97,7 +144,12 @@ class MissionExecutorNode(Node):
             self.get_logger().warning(f"arm spec unavailable ({exc}) — canned pick poses")
             self._arm = None
             ik_reach = None
-        self._logic = MissionLogic(bin_center=_towel_bin_center(), ik_reach=ik_reach)
+        reach_clear = _make_reach_clear()
+        if reach_clear is None:
+            self.get_logger().warning("nav grid unavailable — pick standoffs not wall-checked")
+        self._logic = MissionLogic(
+            bin_center=_towel_bin_center(), ik_reach=ik_reach, reach_clear=reach_clear,
+        )
         self._llm = create_llm_client()
         self._llm_consult_interval = float(os.environ.get("MISSION_LLM_INTERVAL", "5.0"))
         self._last_llm_at = 0.0
