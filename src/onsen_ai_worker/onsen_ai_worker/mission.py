@@ -162,6 +162,11 @@ class MissionLogic:
         self._stow_entry_kg = 0.0     # load-cell reading when STOW began (verify delta)
         self._unload_cycles = 0       # arm-unload cycles this delivery trip
         self._unload_last_kg: float | None = None  # progress check between cycles
+        # Weight known to be stuck in the bin after a stalled unload (outside
+        # the fixed BIN_PICK reach). SEARCH only starts another delivery trip
+        # once the bin holds MORE than this — otherwise a permanently stuck
+        # leftover loops the robot between the floor bin and UNLOAD forever.
+        self._leftover_kg = 0.0
 
     def update(self, inp: MissionInput) -> MissionOutput:
         if inp.safety_stop:
@@ -207,8 +212,10 @@ class MissionLogic:
                 state="SEARCH", target_id=self.target["id"],
                 reason=f"towel {self.target['id']} selected",
             )
-        if inp.bin_kg >= BIN_MIN_DELIVER_KG:
+        if inp.bin_kg >= BIN_MIN_DELIVER_KG and inp.bin_kg > self._leftover_kg + 0.1:
             # Nothing left to pick but the bin has a partial batch — deliver it.
+            # (The leftover guard skips re-delivering weight a stalled unload
+            # already failed to lift; a fresh stow raises the reading past it.)
             self._enter("TO_BIN")
             return MissionOutput(state="SEARCH", reason="no towels left — delivering batch")
         # nothing graspable right now (none seen, or all parked) — scan in place
@@ -366,6 +373,7 @@ class MissionLogic:
             if out is not None:
                 return out
         if inp.bin_kg < BIN_MIN_DELIVER_KG:
+            self._leftover_kg = 0.0
             self._enter("SEARCH")
             return MissionOutput(state="UNLOAD", arm_command="A HOME",
                                  reason="bin empty — batch delivered")
@@ -374,6 +382,7 @@ class MissionLogic:
             and inp.bin_kg > self._unload_last_kg - STOW_VERIFY_KG
         )
         if self._unload_cycles >= MAX_UNLOAD_CYCLES or (self._unload_cycles > 0 and no_progress):
+            self._leftover_kg = inp.bin_kg
             self._enter("SEARCH")
             return MissionOutput(state="UNLOAD", arm_command="A HOME",
                                  reason="unload stalled — leftover rides to next trip")
@@ -575,6 +584,7 @@ class MissionLogic:
         self._stow_entry_kg = 0.0
         self._unload_cycles = 0
         self._unload_last_kg = None
+        self._leftover_kg = 0.0
 
     def _enter(self, state: str) -> None:
         """Transition to a new state, clearing any in-flight nav goal/sequence."""

@@ -11,13 +11,10 @@ import math
 import pytest
 
 from onsen_ai_worker.mission import (
-    DUMP_HOME_TICKS,
-    DUMP_TILT_TICKS,
     GLOBAL_FAIL_LIMIT,
     MAX_APPROACH_RETRIES,
     MAX_PICK_ATTEMPTS,
     MAX_UNLOAD_CYCLES,
-    NAV_LIMBO_TICKS,
     NAV_LIMBO_TICKS,
     PICK_SEQUENCE,
     PICK_TOL_X,

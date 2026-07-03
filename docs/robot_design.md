@@ -38,8 +38,8 @@ Y left, Z up.
 | Deck | z | Contents | Why |
 |---|---|---|---|
 | 0 (tub) | 0.06–0.20 | battery (center-rear), drivers, e-stop relay | counterweights the front arm; IP-skirted |
-| 1 | 0.34 | SBC, IMU at CoG, front sensor cluster, rear camera | open sides keep arm sweep + airflow clear |
-| 2 | 0.44 | arm base front-center (x +0.26), basket left-aft (rim 0.50), LIDAR mast rear-center | pick workspace ahead of the robot; basket bearing matches `DROP_BASKET` pan 178° |
+| 1 | 0.34 | hardware tray: SBC, motor drivers, IMU at CoG, front sensor cluster, rear camera; also the collect-bin floor + load cell | open sides keep arm sweep + airflow clear |
+| 2 | 0.44+ | arm base front-center (x +0.26), **collect-bin tray spanning the deck** (rim 0.58), LIDAR mast front-right corner | pick workspace ahead; the whole top deck is payload volume |
 
 Nothing except the mast and a DROP-phase wrist exceeds z 0.58 — a 40 mm guard
 band under the 0.62 m scan plane.
@@ -94,40 +94,53 @@ Known limitations (documented, mitigated):
   tracking error in `/joint_states`
 - Payload check: 0.3 kg towel at full reach ≈ 2.1 N·m at the shoulder — inside
   bus-servo torque (~25 kg·cm geared)
-- Two drop poses: `DROP_BASKET` (pan 177°, release at (0.27, 0.20, 0.65) over
-  the onboard collect bin) and `DROP_BIN` (pan 178°, extended links, release
-  0.72 m from base center at z 0.66) — the extended pose exists because the
-  robot body can never get closer than bin-half + robot-half ≈ 0.62 m to a
-  floor bin's center, so a short-radius drop cannot reach over a bin rim
+- Key poses: `DROP_BASKET` (over-the-shoulder arc, release at (−0.07, 0, 0.66)
+  above the deck-bin rim), `BIN_PICK` (reach back INSIDE the deck bin,
+  fingertip z 0.42) and `DROP_BIN` (pan 178°, extended links, release 0.72 m
+  from base center at z 0.66) — the extended pose exists because the robot
+  body can never get closer than bin-half + robot-half ≈ 0.62 m to a floor
+  bin's center, so a short-radius drop cannot reach over a bin rim
 
-## Collect bin (batch collection)
+## Collect bin (batch collection, top deck)
 
-- Open-top bin on the front-left deck: interior 0.24 × 0.24 × 0.18 m, floor at
-  z 0.40, **rim at z 0.58** — the 40 mm guard band under the 0.62 m lidar plane
-  holds. Front-left because the arm's 0–180° pan only reaches x ≥ the shoulder
-  (0.26); the original left-aft basket location came from the same constraint
+- The **entire top deck is the bin**: an open-top tray, interior
+  0.37 × 0.30 × 0.22 m (~24 L, 6+ crumpled towels), floor on the deck-1
+  hardware tray at z 0.36, **rim at z 0.58** — the 40 mm guard band under the
+  0.62 m lidar plane holds, and the tray sits FULLY inside the chassis
+  footprint (the earlier side basket overhung the body and bumped walls).
+  Deck 1 below carries all electronics (SBC, drivers, IMU); the lidar mast
+  moved to the front-right corner (small self-occlusion wedge toward the arm
+  column, redundantly covered by the front camera + sonar)
+- The bin sits BEHIND the arm's shoulder — unreachable by pan (0–180° covers
+  x ≥ 0.26) but reachable by the chain's **negative-radial arc**: DROP_BASKET
+  [90, 86…] keeps pan forward and arcs the arm up over its own shoulder,
+  releasing at (−0.07, 0, 0.66) above the rim. BIN_PICK reaches back INSIDE
+  the bin (fingertip z 0.42, elbow above the rim) to lift towels out again
 - Towels are carried **crumpled** (a grasped cloth bunches and stays bunched:
-  visual scale and collider both 0.195 × 0.143 × 0.081 m) so they fit the bin
-  in any orientation — a flat rigid towel would not; reset() un-crumples
+  visual scale and collider both 0.195 × 0.143 × 0.081 m) so they land and
+  stack in the tray in any orientation; reset() un-crumples
 - **Load cell**: single-point strain gauge + HX711 under the bin floor (the
   open-source standard weighing stack). FE publishes the measured weight on
   `/robot/bin_load` at 2 Hz with noise; the base firmware (ATmega class)
-  debounce-thresholds it into `bin_full` at 0.45 kg ≈ 2 towels on
-  `/base/state`. Full detection by weight; an IR rim break-beam is the
-  documented hardware upgrade for bulky-light loads
-- **Dump servo**: the bin hinges along its outboard-bottom edge; one bus servo
-  (ID 7 on the arm's UART chain, MG995 class) tilts it 110° at 90°/s over the
-  robot's left side — `BIN DUMP` / `BIN HOME` / `BIN Q` on the base protocol.
-  Contents are physically pushed out by the rotating walls (colliders swing
-  with the visual), landing 0.45–0.65 m to the left — the mission's ALIGN_BIN
-  points that offset at the floor bin before dumping
-- Mass budget: 2–3 towels = 0.5–0.75 kg against the 2.5 kg "basket + payload"
-  allocation; CoG rises < 15 mm; spin diameter with the bin corner is 1.05 m,
-  inside the 1.10 m doorways. Nav plans with ROBOT_RADIUS 0.36 (bin lateral
-  extent), with bumper recovery as the rotate-in-place backstop
-- Mission policy: PICK → STOW (into own bin) → SEARCH … until `bin_full` or no
-  towels remain, then one TO_BIN → ALIGN_BIN → DUMP trip — ~3× fewer delivery
-  legs than per-towel delivery
+  debounce-thresholds it into `bin_full` at 0.70 kg ≈ 3 towels on
+  `/base/state`. The load cell closes THREE loops: **stow verification** (a
+  release only counts once the weight rises by a towel — a drop that misses
+  the bin sends the robot back to re-acquire, instead of "collecting" nothing
+  forever), **full detection**, and the **unload loop condition**
+- **Delivery is BY ARM** (UNLOAD): BIN_PICK → CLOSE_GRIPPER → DROP_BIN →
+  release at z 0.66 over the 0.55 m floor-bin rim, one towel per cycle until
+  the load cell reads empty (guards: cycle cap + no-progress ⇒ leftover rides
+  to the next trip and is excluded from re-delivery until new weight arrives).
+  A servo tilt-dump of the deck tray was rejected on geometry: its hinge is
+  capped at the 0.58 rim (lidar guard band), so tilted contents exit BELOW the
+  0.55 floor-bin rim and cannot clear it. The `BIN DUMP`/`BIN HOME` servo
+  channel remains in the base firmware as a maintenance/floor-dump feature
+- Mass budget: 3 towels = 0.75 kg against the 2.5 kg "basket + payload"
+  allocation; CoG rises < 15 mm; the tray adds nothing to the footprint —
+  nav plans with ROBOT_RADIUS 0.36, bumper recovery as backstop
+- Mission policy: PICK → STOW (load-cell-verified) → SEARCH … until `bin_full`
+  or no towels remain, then one TO_BIN → ALIGN_BIN → UNLOAD trip — ~3× fewer
+  delivery legs than per-towel delivery
 - **Grasp is a physics joint**: closing the gripper within the grasp radius
   creates a fixed joint to the still-dynamic towel; carried mass is pushed
   back onto the chassis (suspension visibly settles); release restores normal
