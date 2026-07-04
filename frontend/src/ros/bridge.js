@@ -33,7 +33,7 @@ export class RosBridge {
   }
 
   publish(topic, message) {
-    if (!this.connected) return;
+    if (!this.connected || this.muted) return;
     let pub = this.publishers.get(topic.name);
     if (!pub) {
       pub = new ROSLIB.Topic({

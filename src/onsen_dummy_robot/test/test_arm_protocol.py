@@ -2,7 +2,12 @@
 robot's arm controller exposes, including the user-facing sample session."""
 from __future__ import annotations
 
-from onsen_dummy_robot.arm_protocol import ACTIONS, ArmFirmware
+from onsen_dummy_robot.arm_protocol import (
+    ACTIONS,
+    EFFORT_HOLD_DEBOUNCE_S,
+    EFFORT_HOLD_THRESHOLD_N,
+    ArmFirmware,
+)
 
 
 def fw() -> ArmFirmware:
@@ -96,6 +101,44 @@ class TestCalibration:
 
     def test_cal_show_lists_all_joints(self):
         assert len(fw().handle("CAL SHOW")) == 6
+
+
+class TestGripperHolding:
+    """gripper_holding is derived from a fed-back wrist load-cell force
+    measurement (the FE's honest payload-weight signal for a scoop grasp,
+    pose-independent), not ground truth."""
+
+    def test_empty_arm_reports_not_holding(self):
+        arm = fw()
+        arm.observe_effort(0.0, now=0.0)
+        assert arm.state_dict()["gripper_holding"] is False
+
+    def test_load_below_threshold_does_not_report_holding(self):
+        arm = fw()
+        arm.observe_effort(EFFORT_HOLD_THRESHOLD_N - 0.01, now=0.0)
+        assert arm.state_dict()["gripper_holding"] is False
+
+    def test_sustained_load_reports_holding_after_debounce(self):
+        arm = fw()
+        force = EFFORT_HOLD_THRESHOLD_N + 1.0
+        arm.observe_effort(force, now=0.0)
+        assert arm.state_dict()["gripper_holding"] is False, "must debounce, not trip instantly"
+        arm.observe_effort(force, now=EFFORT_HOLD_DEBOUNCE_S + 0.01)
+        assert arm.state_dict()["gripper_holding"] is True
+
+    def test_load_dropping_clears_holding_immediately(self):
+        arm = fw()
+        force = EFFORT_HOLD_THRESHOLD_N + 1.0
+        arm.observe_effort(force, now=0.0)
+        arm.observe_effort(force, now=EFFORT_HOLD_DEBOUNCE_S + 0.01)
+        assert arm.state_dict()["gripper_holding"] is True
+        arm.observe_effort(0.0, now=EFFORT_HOLD_DEBOUNCE_S + 0.02)
+        assert arm.state_dict()["gripper_holding"] is False
+
+    def test_payload_force_reported_in_state(self):
+        arm = fw()
+        arm.observe_effort(2.45, now=0.0)
+        assert arm.state_dict()["payload_force_n"] == 2.45
 
 
 class TestErrors:

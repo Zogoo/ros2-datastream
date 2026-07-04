@@ -23,12 +23,25 @@ describe('arm forward kinematics', () => {
     expect(Math.abs(fk.fingertip[1])).toBeLessThan(0.01);
   });
 
-  it('DROP_BASKET hovers over the side basket', () => {
-    const fk = armFk([178, 100, 85, 85, 90, 12], arm);
+  it('DROP_BASKET hovers over the collect bin, above its rim', () => {
+    const fk = armFk([90, 89, 135, 146, 90, 12], arm);
     const basket = spec.basket;
     expect(Math.abs(fk.fingertip[0] - basket.center[0])).toBeLessThan(basket.size[0] / 2);
-    expect(Math.abs(fk.fingertip[1] - basket.center[1])).toBeLessThan(basket.size[1] / 2 + 0.04);
-    expect(fk.fingertip[2]).toBeGreaterThan(basket.rim_z);
+    expect(Math.abs(fk.fingertip[1] - basket.center[1])).toBeLessThan(basket.size[1] / 2);
+    expect(fk.fingertip[2]).toBeGreaterThan(basket.rim_z + 0.03);
+    expect(fk.fingertip[2]).toBeLessThan(basket.rim_z + 0.15);
+  });
+
+  it('BIN_PICK reaches INSIDE the collect bin with links clear of the rim', () => {
+    const fk = armFk([90, 84, 169, 106, 90, 80], arm);
+    const basket = spec.basket;
+    // fingertip low inside the bin volume, over the stow pile
+    expect(Math.abs(fk.fingertip[0] - basket.center[0])).toBeLessThan(basket.size[0] / 2);
+    expect(Math.abs(fk.fingertip[1] - basket.center[1])).toBeLessThan(basket.size[1] / 2);
+    expect(fk.fingertip[2]).toBeLessThan(basket.rim_z - 0.10);
+    expect(fk.fingertip[2]).toBeGreaterThan(basket.center[2] - basket.size[2] / 2);
+    // elbow must clear the rim so only the wrist enters the opening
+    expect(fk.elbow[2]).toBeGreaterThan(basket.rim_z);
   });
 
   it('pan rotates the fingertip about Z', () => {

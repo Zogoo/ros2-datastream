@@ -12,6 +12,8 @@ setup(
         ('lib/' + package_name, [
             'scripts/ai_worker_node',
             'scripts/mission_executor_node',
+            'scripts/towel_tracker_node',
+            'scripts/eval_node',
         ]),
     ],
     install_requires=['setuptools'],
@@ -25,6 +27,8 @@ setup(
         'console_scripts': [
             'ai_worker_node = onsen_ai_worker.ai_worker_node:main',
             'mission_executor_node = onsen_ai_worker.mission_executor_node:main',
+            'towel_tracker_node = onsen_ai_worker.towel_tracker_node:main',
+            'eval_node = onsen_ai_worker.eval_node:main',
         ],
     },
 )

@@ -28,15 +28,36 @@ Then open **http://localhost:8080** (single tab — the tab *is* the simulator).
 | `frontend` | Physics sim + control UI | http://localhost:8080 |
 | `rosbridge` | FE <-> ROS2 WebSocket | ws://localhost:9090 |
 | `foxglove_bridge` | Foxglove Studio | ws://localhost:8765 |
-| `ai_worker` | Detection + planning + HTTP API | http://localhost:5000 |
-| `mission_executor` | Autonomy loop (AUTO mode) | — |
+| `ai_worker` | Detection + depth-ranging + planning + HTTP API | http://localhost:5000 |
+| `towel_tracker` | Map-frame towel tracks from detections | — |
+| `mission_executor` | Autonomy loop: Nav2-style goals + analytic-IK pick (AUTO mode) | — |
+| `nav_server` | A* planner + regulated pure-pursuit tracker (`/nav/goal`) | — |
+| `localizer` | Likelihood-field scan matcher (`map->odom`) | — |
+| `nav_static_tf` | Static TF tree from robot_spec | — |
+| `depth_scan` | Low-obstacle `/scan_low` from the depth camera | — |
+| `arm_description` | URDF + coupled joint bridge + robot_state_publisher | — |
 | `base_controller` | Wheel firmware (`/base/command`) | — |
 | `arm_controller` | Arm firmware (`/arm/command`) | — |
 | `control_arbitrator` | Manual/auto `/cmd_vel` owner | — |
 | `robot_state` | Safety e-stop + `/robot/state` fusion | — |
 | `dummy_robot` | Headless sim source (`SIM_SOURCE`) | — |
 
+`docker compose --profile eval up` adds the `eval` node (the only ground-truth
+consumer: scores localization + tracking on `/eval/metrics`).
+
 Rebuild after code changes: `docker compose up --build`.
+
+## Autonomy
+
+In **AUTO** mode the robot is fully autonomous with ground truth out of the
+control path: the **localizer** (likelihood-field scan matching against a map
+rasterized from the layout) provides pose, **perception** ranges towels with
+the depth camera and the **tracker** turns detections into stable map-frame
+targets, the **nav server** (A* + regulated pure pursuit) plans and drives to
+each waypoint, and the **arm** reaches the *measured* towel pose with a
+closed-form analytic IK solver (verified against the simulator's FK to machine
+precision). Design rationale, paper/plugin comparisons, and the IK derivation
+are in [docs/research_notes.md](docs/research_notes.md).
 
 ## Controls
 

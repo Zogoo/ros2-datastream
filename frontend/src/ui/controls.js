@@ -55,6 +55,20 @@ export class Controls {
       armBtn.classList.toggle('active', this.safetyArmed);
       this.ros.publish(TOPICS.safetyEnable, { data: this.safetyArmed });
     });
+    // The armed flag lives in the robot_state NODE and outlives browser
+    // sessions, while this button resets to OFF on every page load — without
+    // a boot-time sync the display lies, and a session armed by a previous
+    // operator/e2e scenario keeps latching e-stops (step impacts during a
+    // stair climb, say) under a UI that reads "E-STOP: OFF". Publish the UI
+    // state once connected so the console is authoritative for its session.
+    const syncArmState = () => {
+      if (this.ros.connected) {
+        this.ros.publish(TOPICS.safetyEnable, { data: this.safetyArmed });
+      } else {
+        setTimeout(syncArmState, 500);
+      }
+    };
+    syncArmState();
     for (const btn of document.querySelectorAll('#arm-pose-btns .arm-btn')) {
       btn.addEventListener('click', () => this.ros.publish(TOPICS.armCommand, { data: btn.dataset.cmd }));
     }

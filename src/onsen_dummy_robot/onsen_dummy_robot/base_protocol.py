@@ -10,6 +10,12 @@ Protocol (one command per line):
   SPEED pct          global scale 1..100
   STOP               halt + latch error
   RESET_ERROR        clear STOP latch (safety latch clears only via safety input)
+  BIN DUMP|HOME|Q    collect-bin dump servo: tilt to dump angle / stow / query
+
+The collect-bin channel also carries the load-cell feedback: the chassis has a
+single-point strain-gauge load cell + HX711 under the bin floor (the standard
+open-hardware weighing stack); observe_bin_load() feeds the measured kg in and
+the firmware debounce-thresholds it into bin_full.
 """
 from __future__ import annotations
 
@@ -19,6 +25,14 @@ WHEEL_RADIUS = 0.07     # m
 TRACK_WIDTH = 0.47      # m
 MAX_WHEEL_RADPS = 12.0  # ~0.84 m/s surface speed
 CMD_TIMEOUT_S = 1.0     # zero output if no twist refresh
+
+# Collect-bin dump servo + load cell (mirrors shared/robot_spec.json basket).
+BIN_DUMP_DEG = 110.0
+BIN_TILT_SPEED_DPS = 90.0
+# bin_full threshold: ~3 towels (0.25 kg each) — the top-deck tray holds more,
+# but delivering at 3 keeps trip lengths sensible.
+BIN_FULL_KG = 0.70
+BIN_LOAD_DEBOUNCE_S = 1.0
 
 
 class BaseFirmware:
@@ -31,6 +45,13 @@ class BaseFirmware:
         self._stopped = False
         self._safety = False
         self._last_cmd_t = -999.0
+        # Collect-bin dump servo (interpolated) + load-cell channel.
+        self._bin_target = 0.0
+        self._bin_tilt = 0.0
+        self._bin_tilt_at = time.monotonic()
+        self._bin_kg = 0.0
+        self._bin_over_since: float | None = None
+        self._bin_full = False
 
     # ── Inputs ────────────────────────────────────────────────────────────────
 
@@ -93,6 +114,20 @@ class BaseFirmware:
                 self._wheels[i] = radps
                 self._last_cmd_t = time.monotonic()
                 return [f"OK W {i} {radps:g}"]
+            if op == "BIN":
+                sub = parts[1].upper() if len(parts) > 1 else "Q"
+                if sub == "DUMP":
+                    self._set_bin_target(BIN_DUMP_DEG)
+                    return ["OK BIN DUMP"]
+                if sub == "HOME":
+                    self._set_bin_target(0.0)
+                    return ["OK BIN HOME"]
+                if sub == "Q":
+                    return [
+                        f"BIN {self.bin_tilt():.0f} {self._bin_kg:.3f} "
+                        f"{'FULL' if self._bin_full else 'OK'}",
+                    ]
+                return [f"ERR BAD_BIN {sub}"]
             return [f"ERR UNKNOWN_CMD {op}"]
         except (ValueError, IndexError):
             return [f"ERR BAD_ARGS {line.strip()}"]
@@ -116,6 +151,40 @@ class BaseFirmware:
         scale = self._speed_pct / 100.0
         return [w * scale for w in self._wheels]
 
+    def _set_bin_target(self, deg: float, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        # Anchor the interpolation at the CURRENT tilt so re-commands mid-swing
+        # don't teleport the estimate.
+        self._bin_tilt = self.bin_tilt(now)
+        self._bin_tilt_at = now
+        self._bin_target = deg
+
+    def bin_tilt(self, now: float | None = None) -> float:
+        """Estimated dump-servo angle: interpolates from the last anchor toward
+        the target at the servo's rated speed (deterministic, no timer task)."""
+        now = time.monotonic() if now is None else now
+        delta = self._bin_target - self._bin_tilt
+        if delta == 0:
+            return self._bin_tilt
+        travelled = BIN_TILT_SPEED_DPS * (now - self._bin_tilt_at)
+        if travelled >= abs(delta):
+            return self._bin_target
+        return self._bin_tilt + travelled * (1 if delta > 0 else -1)
+
+    def observe_bin_load(self, kg: float, now: float | None = None) -> None:
+        """Feed the measured load-cell weight (kg). bin_full latches after the
+        reading stays over BIN_FULL_KG for BIN_LOAD_DEBOUNCE_S — one noisy or
+        transient spike (a towel bouncing in) must not trigger a delivery."""
+        now = time.monotonic() if now is None else now
+        self._bin_kg = kg
+        if kg < BIN_FULL_KG:
+            self._bin_over_since = None
+            self._bin_full = False
+            return
+        if self._bin_over_since is None:
+            self._bin_over_since = now
+        self._bin_full = (now - self._bin_over_since) >= BIN_LOAD_DEBOUNCE_S
+
     def state_dict(self) -> dict:
         return {
             "status": self.status,
@@ -124,6 +193,10 @@ class BaseFirmware:
             "wz": round(self._wz, 3),
             "speed_pct": self._speed_pct,
             "wheels_radps": [round(w, 3) for w in self.scaled_wheels()],
+            "bin_tilt_target_deg": round(self._bin_target, 1),
+            "bin_tilt_deg": round(self.bin_tilt(), 1),
+            "bin_kg": round(self._bin_kg, 3),
+            "bin_full": self._bin_full,
         }
 
     # ── Internals ─────────────────────────────────────────────────────────────

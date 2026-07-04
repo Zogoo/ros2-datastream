@@ -16,6 +16,8 @@ export const TOPICS = {
   jointStates: { name: '/joint_states', type: 'sensor_msgs/JointState' },
   contacts: { name: '/robot/contacts', type: 'std_msgs/String' },
   events: { name: '/robot/events', type: 'std_msgs/String' },
+  heldObject: { name: '/robot/held_object', type: 'std_msgs/String' },
+  binLoad: { name: '/robot/bin_load', type: 'std_msgs/String' },
   groundTruthPose: { name: '/ground_truth/pose', type: 'geometry_msgs/PoseStamped' },
   groundTruthObjects: { name: '/ground_truth/objects', type: 'std_msgs/String' },
   simStatus: { name: '/sim/status', type: 'std_msgs/String' },
@@ -33,8 +35,16 @@ export const TOPICS = {
   safetyStop: { name: '/safety/stop', type: 'std_msgs/Bool' },
   armResponse: { name: '/arm/response', type: 'std_msgs/String' },
   baseResponse: { name: '/base/response', type: 'std_msgs/String' },
+  baseState: { name: '/base/state', type: 'std_msgs/String' },
   controlMode: { name: '/robot/control_mode', type: 'std_msgs/String' },
   detectedObjects: { name: '/detected_objects', type: 'std_msgs/String' },
   taskPlan: { name: '/task_plan', type: 'std_msgs/String' },
   missionState: { name: '/mission/state', type: 'std_msgs/String' },
+
+  // Navigation / perception (onsen_nav + ai_worker)
+  navGoal: { name: '/nav/goal', type: 'std_msgs/String' },
+  navStatus: { name: '/nav/status', type: 'std_msgs/String' },
+  navPath: { name: '/nav/path', type: 'nav_msgs/Path' },
+  locPose: { name: '/localization/pose', type: 'geometry_msgs/PoseWithCovarianceStamped' },
+  towelTracks: { name: '/perception/towel_tracks', type: 'std_msgs/String' },
 };

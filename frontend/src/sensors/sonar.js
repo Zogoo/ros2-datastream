@@ -1,7 +1,9 @@
 import { TOPICS } from '../ros/topics.js';
-import { GROUP_WORLD, groups } from '../physics/world.js';
+import { GROUP_OBJECT, GROUP_WORLD, groups } from '../physics/world.js';
 
-const QUERY = groups(0xffff, GROUP_WORLD);
+// Sonar is the low-altitude safety net (z 0.10): it must see the movable props
+// (stools, buckets, towels) that sit below the LIDAR plane, as well as walls.
+const QUERY = groups(0xffff, GROUP_WORLD | GROUP_OBJECT);
 
 /** Ultrasonic ring: each transducer casts a fan of rays inside its cone and
  *  reports the minimum hit — the real beam-width artifact (wide objects read

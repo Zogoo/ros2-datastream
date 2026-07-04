@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { RosProbe, bootSim, setAuto } from '../helpers/ros.js';
+import { RosProbe, bootSim, setAuto, setManual } from '../helpers/ros.js';
 
 // The core acceptance test: AUTO mode picks a thrown towel and bins it.
 test('towel mission: autonomy approaches, picks and delivers to the towel bin', async ({ page }) => {
@@ -11,6 +11,11 @@ test('towel mission: autonomy approaches, picks and delivers to the towel bin', 
 
   await bootSim(page);
   await probe.clearSafety();
+
+  // Hold MANUAL while staging: control mode defaults to auto, so the mission
+  // would otherwise lock a target from the pre-teleport spawn pose (a race —
+  // it then chases a towel across the map instead of the staged one).
+  await setManual(page);
 
   // stage: robot in the corridor facing north, towel 1 m ahead, bin close by
   // (keeps the deliver leg short so grasp retries don't eat the timeout)

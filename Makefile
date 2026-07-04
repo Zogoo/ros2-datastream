@@ -2,10 +2,11 @@
 # are needed; FE tooling uses the local node_modules (npm install once).
 
 ROS_IMAGE ?= onsen-ros:latest
-PY_PKGS    = src/onsen_ai_worker src/onsen_robot_state src/onsen_dummy_robot
+PY_PKGS    = src/onsen_ai_worker src/onsen_robot_state src/onsen_dummy_robot src/onsen_nav src/onsen_arm
 DOCKER_PY  = docker run --rm \
 	-v $(PWD)/src:/ws/src \
 	-v $(PWD)/shared:/ros2_ws/shared \
+	-v $(PWD)/shared:/ws/shared \
 	-v $(PWD)/pyproject.toml:/ws/pyproject.toml \
 	-w /ws --entrypoint bash $(ROS_IMAGE) -lc
 
@@ -23,7 +24,7 @@ type-py:
 	$(DOCKER_PY) "python3 -m mypy $(PY_PKGS)"
 
 test-py:
-	$(DOCKER_PY) "PYTHONPATH=/ws/src/onsen_ai_worker:/ws/src/onsen_robot_state:/ws/src/onsen_dummy_robot \
+	$(DOCKER_PY) "PYTHONPATH=/ws/src/onsen_ai_worker:/ws/src/onsen_robot_state:/ws/src/onsen_dummy_robot:/ws/src/onsen_nav:/ws/src/onsen_arm \
 		python3 -m pytest $(addsuffix /test,$(PY_PKGS)) -q"
 
 check-fe: lint-fe test-fe

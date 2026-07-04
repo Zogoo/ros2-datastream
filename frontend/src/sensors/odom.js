@@ -19,6 +19,13 @@ export class OdomSensor {
     this.wheelAngles = [0, 0];
   }
 
+  /** Re-anchor the integrator after a staged teleport (window.__sim.setPose).
+   *  Without this, odom keeps integrating from the old spawn pose and the
+   *  localizer's small search window can't bridge the jump. */
+  reset(x, y, yaw) {
+    this.pose = { x, y, yaw, v: 0, w: 0 };
+  }
+
   update(dt) {
     const { left, right } = this.robot.suspension.sideSurfaceSpeeds();
     this.pose = integrateOdometry(this.pose, left, right, this.spec.wheels.track_width, dt);

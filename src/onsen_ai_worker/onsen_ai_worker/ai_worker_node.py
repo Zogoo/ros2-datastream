@@ -17,7 +17,7 @@ from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Bool, String
 
-from .detection import Detector, load_camera_model
+from .detection import DepthRefiner, Detector, height_gate, load_camera_model, load_depth_refiner
 from .http_api import start_http_api
 from .planner import TaskPlanner
 
@@ -38,6 +38,13 @@ class AIWorkerNode(Node):
             self.get_logger().warning(f"robot_spec.json unavailable ({exc}) — positions disabled")
             camera_model = None
         self._detector = Detector(camera_model)
+        self._refiner: DepthRefiner | None
+        try:
+            self._refiner = load_depth_refiner()
+        except (OSError, KeyError) as exc:
+            self.get_logger().warning(f"depth spec unavailable ({exc}) — depth refine off")
+            self._refiner = None
+        self._depth_mm: np.ndarray | None = None
         self._planner = TaskPlanner()
         self._safety_stop = False
         self._frame_count = 0
@@ -55,6 +62,9 @@ class AIWorkerNode(Node):
                 self._on_compressed, SENSOR_QOS,
             )
         self.create_subscription(Bool, "/safety/stop", self._on_safety, 10)
+        self.create_subscription(
+            Image, "/camera/depth/image_raw", self._on_depth, SENSOR_QOS,
+        )
 
         self._pub_detections = self.create_publisher(String, "/detected_objects", 10)
         self._pub_task_plan = self.create_publisher(String, "/task_plan", 10)
@@ -67,6 +77,13 @@ class AIWorkerNode(Node):
 
     def _on_safety(self, msg: Bool) -> None:
         self._safety_stop = bool(msg.data)
+
+    def _on_depth(self, msg: Image) -> None:
+        if msg.encoding != "16UC1":
+            return
+        self._depth_mm = np.frombuffer(bytes(msg.data), np.uint16).reshape(
+            msg.height, msg.width,
+        )
 
     def _on_image(self, msg: Image) -> None:
         img = ros_image_to_bgr(msg)
@@ -84,7 +101,21 @@ class AIWorkerNode(Node):
             return
         self._last_processed_at = now
         self._frame_count += 1
-        self._publish_results(self._detector.detect(img))
+        detections = self._detector.detect(img)
+        if self._refiner is not None:
+            for det in detections:
+                position, rng, source = self._refiner.refine(
+                    det.get("estimated_position"), self._depth_mm,
+                )
+                det["position_refined"] = position
+                det["range"] = rng
+                det["source"] = source
+            if self._detector.camera is not None:
+                # bbox pixels are in the RGB frame -> use the RGB focal lengths
+                detections = height_gate(
+                    detections, self._detector.camera.fy, self._detector.camera.fx,
+                )
+        self._publish_results(detections)
 
     def _publish_results(self, detections: list[dict]) -> None:
         self._pub_detections.publish(String(data=json.dumps({

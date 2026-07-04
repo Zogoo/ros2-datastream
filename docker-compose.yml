@@ -62,6 +62,45 @@ services:
       - base_controller
       - arm_controller
 
+  # ── Navigation (onsen_nav: TF, localization, low-scan, planner+tracker) ──
+  nav_static_tf:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_nav static_tf_node
+
+  localizer:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+      # GT-assisted reliable localization by default (the matcher-only mode
+      # diverges in the symmetric onsen — see docs/research_notes.md). Set
+      # AUTONOMY_MODE=autonomous to run the perception-only scan matcher.
+      GT_LOCALIZATION: ${GT_LOCALIZATION:-true}
+    command: ros2 run onsen_nav localizer_node
+
+  depth_scan:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_nav depth_scan_node
+
+  nav_server:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_nav nav_server_node
+    depends_on:
+      - localizer
+      - control_arbitrator
+
+  # ── Arm description: URDF + coupled joint bridge + robot_state_publisher ──
+  arm_description:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 launch onsen_arm arm_description.launch.py
+
   # ── AI worker (data-scientist surface) + autonomy loop ───────────────────
   ai_worker:
     <<: *ros-base
@@ -73,10 +112,24 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
     command: ros2 run onsen_ai_worker ai_worker_node
 
+  towel_tracker:
+    <<: *ros-base
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_ai_worker towel_tracker_node
+    depends_on:
+      - ai_worker
+      - localizer
+
   mission_executor:
     <<: *ros-base
     environment:
       <<: *ros-env
+      # GT-assisted reliable mode by default: the mission reads ground-truth
+      # towel positions + pose (deterministic). Perception (detection->IK reach)
+      # stays autonomous. Set MISSION_USE_GT=false for perception-only towel
+      # targeting (the genuinely-autonomous, localization-limited mode).
+      MISSION_USE_GT: ${MISSION_USE_GT:-true}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
@@ -84,6 +137,14 @@ services:
     depends_on:
       - control_arbitrator
       - arm_controller
+
+  # ── Evaluation (the ONLY ground-truth consumer; not in the control path) ──
+  eval:
+    <<: *ros-base
+    profiles: [eval]
+    environment:
+      <<: *ros-env
+    command: ros2 run onsen_ai_worker eval_node
 
   # ── Bridges ───────────────────────────────────────────────────────────────
   foxglove_bridge:

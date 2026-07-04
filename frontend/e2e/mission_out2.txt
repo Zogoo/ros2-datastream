@@ -1,0 +1,11 @@
+t=0s mission=PICK nav=cancelled holding=false/false src=localization reason="settling" gt=(0.02,-0.90)
+t=2s mission=PICK nav=cancelled holding=false/false src=localization reason="arm A PICK_SCOOP" gt=(0.03,-0.90)
+t=4s mission=PICK nav=cancelled holding=false/false src=localization reason="A PICK_LIFT" gt=(0.04,-0.90)
+t=6s mission=PICK nav=cancelled holding=false/false src=localization reason="arm A PICK_RETRACT" gt=(0.05,-0.89)
+t=8s mission=APPROACH nav=active holding=false/false src=localization reason="navigating" gt=(0.04,-0.80)
+t=14s mission=PICK nav=cancelled holding=false/false src=localization reason="arm A PRE_PICK" gt=(-0.14,-0.03)
+t=16s mission=PICK nav=cancelled holding=false/false src=localization reason="arm J 86 167 54 123 90 80 900" gt=(-0.13,-0.04)
+t=18s mission=PICK nav=cancelled holding=false/false src=localization reason="settling" gt=(-0.12,-0.04)
+t=20s mission=PICK nav=cancelled holding=false/false src=localization reason="arm A PICK_RETRACT" gt=(-0.11,-0.05)
+t=22s mission=APPROACH nav=failed holding=false/false src=localization reason="navigating" gt=(-0.10,-0.05)
+BINNED: null

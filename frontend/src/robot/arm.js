@@ -1,13 +1,43 @@
 import * as THREE from 'three';
 import { armFk, gripperOpening, isGripperClosed, servoStep } from './kinematics.js';
-import { GROUP_ARM, GROUP_ROBOT, GROUP_WORLD, groups } from '../physics/world.js';
+import { GROUP_ARM, GROUP_OBJECT, GROUP_WORLD, OBJECT_FILTER, groups } from '../physics/world.js';
 
 const GRAVITY = 9.81;
+// While held the item belongs to GROUP_OBJECT but collides with nothing —
+// walls and furniture cannot interact with a carried prop.
+const HELD_GROUPS = groups(GROUP_OBJECT, 0);
+// Free props use the normal object filter so they rest on the floor.
+const FREE_GROUPS = groups(GROUP_OBJECT, OBJECT_FILTER);
+
+// A grasped cloth bunches into a crumple and STAYS crumpled once handled —
+// applied to both the visual scale and the physics collider half-extents, so
+// a handled towel (0.195 x 0.143 x 0.081 m) fits the onboard collect bin in
+// any orientation (flat rigid towels would not). Reset restores flat.
+export const CRUMPLE_SCALE = { x: 0.65, y: 0.65, z: 1.8 };
+const GRIP_SCALE = new THREE.Vector3(CRUMPLE_SCALE.x, CRUMPLE_SCALE.y, CRUMPLE_SCALE.z);
+
+// Static-geometry kinds the arm can legitimately touch (the gripper brushes
+// the floor at the bottom of every scoop) vs. a genuine wall/prop/bin strike.
+const WALL_CONTACT_KINDS = new Set(['wall', 'prop', 'bin_wall', 'platform']);
+const WALL_CONTACT_DEBOUNCE_MS = 500; // avoid flooding /robot/events on sustained contact
 
 const HOME = [90, 90, 90, 90, 90, 70];
 
-/** 6-axis arm: servo lag toward firmware joint targets, FK-driven visuals,
- *  kinematic colliders for forearm/gripper, and geometric grasping. */
+/** Grasp events queue — drained by main.js onto /robot/events. Emulates a
+ *  gripper payload/force sensor: a sensor signal, not ground truth. */
+export const graspEvents = [];
+
+/**
+ * 6-axis arm: servo lag toward firmware joint targets, FK-driven visuals,
+ * kinematic colliders for forearm/gripper, and kinematic-body carry.
+ *
+ * Carry strategy: on grasp the held item's Rapier body is switched to
+ * KinematicPositionBased and driven to (fingertip + carryOffset) every tick.
+ * This guarantees the item follows the arm exactly with no joint stress, no
+ * depenetration surprises on release, and no wall-sticking — HELD_GROUPS
+ * already prevents collisions while carried. On release the body is switched
+ * back to Dynamic and given the current fingertip velocity.
+ */
 export class Arm {
   constructor(physics, robot, armSpec, objects) {
     this.physics = physics;
@@ -18,10 +48,15 @@ export class Arm {
     this.current = [...HOME];
     this.target = [...HOME];
     this.heldItem = null;
-    this.graspJoint = null;
+    this._carryOffset = null;   // world-frame offset: item_center − fingertip at pickup
+    this._heldMass = 0;         // dynamic-body mass cached at grasp (kinematic reports 0)
     this.wasClosed = false;
     this.lastFingertip = null;
     this.fingertipVel = { x: 0, y: 0, z: 0 };
+    this._lastWallContactAt = 0;
+    // Per-joint effort (N·m), reported on /joint_states. Only the shoulder
+    // channel is populated — see _updateEffort.
+    this.effort = new Array(6).fill(0);
 
     this._buildKinematicColliders();
     this._buildVisuals();
@@ -32,17 +67,29 @@ export class Arm {
     const makeBody = () => world.createRigidBody(
       R.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0, 2),
     );
+    // Rapier's ActiveCollisionTypes.DEFAULT (DYNAMIC_DYNAMIC|DYNAMIC_FIXED|
+    // DYNAMIC_KINEMATIC) does NOT include KINEMATIC_FIXED — a kinematic body
+    // (this arm) against a fixed body (a wall) is silently excluded from
+    // collision detection entirely unless explicitly opted in, independent of
+    // ActiveEvents. Without this, ARM_CONTACT can never fire.
+    const armCollisionTypes = R.ActiveCollisionTypes.DEFAULT | R.ActiveCollisionTypes.KINEMATIC_FIXED;
+
     this.forearmBody = makeBody();
     const forearmCol = world.createCollider(
       R.ColliderDesc.capsule(this.spec.links.forearm / 2, 0.03)
-        .setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD)),
+        .setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD | GROUP_OBJECT))
+        .setActiveEvents(R.ActiveEvents.COLLISION_EVENTS)
+        .setActiveCollisionTypes(armCollisionTypes),
       this.forearmBody,
     );
     this.physics.registerMeta(forearmCol, { kind: 'robot', part: 'arm_forearm' });
 
     this.gripperBody = makeBody();
     const gripCol = world.createCollider(
-      R.ColliderDesc.ball(0.045).setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD)),
+      R.ColliderDesc.ball(0.045)
+        .setCollisionGroups(groups(GROUP_ARM, GROUP_WORLD | GROUP_OBJECT))
+        .setActiveEvents(R.ActiveEvents.COLLISION_EVENTS)
+        .setActiveCollisionTypes(armCollisionTypes),
       this.gripperBody,
     );
     this.physics.registerMeta(gripCol, { kind: 'robot', part: 'gripper' });
@@ -83,8 +130,49 @@ export class Arm {
     return this.heldItem !== null;
   }
 
+  /** Returns {object_id, object_class, position} of the held item, or null. */
+  heldObjectInfo() {
+    if (!this.heldItem) return null;
+    const p = this.heldItem.body.translation();
+    return {
+      object_id: this.heldItem.id,
+      object_class: this.heldItem.cls,
+      position: { x: p.x, y: p.y, z: p.z },
+    };
+  }
+
   forceRelease() {
     if (this.heldItem) this._release();
+  }
+
+  /**
+   * Reactive wall-contact detection — call once per physics step, AFTER
+   * `physics.step()` (collision events only exist post-step). Uses Rapier's
+   * COLLISION_EVENTS (geometric start/stop, independent of body type/force —
+   * unlike CONTACT_FORCE_EVENTS, which kinematic bodies do not reliably
+   * generate since they aren't part of the force solver). The forearm/gripper
+   * are kinematic and pass through geometry with no physical resolution, so
+   * without this the arm could silently clip through a wall during a
+   * PICK/DROP sequence; this is the sensor edge a real servo's stall/current
+   * limit would report, published as ARM_CONTACT for the mission FSM to abort
+   * on (see mission.py _handle_arm_contact).
+   */
+  drainWallContacts() {
+    this.physics.eventQueue.drainCollisionEvents((h1, h2, started) => {
+      if (!started) return;
+      const meta1 = this.physics.metaOf(h1);
+      const meta2 = this.physics.metaOf(h2);
+      const isArmPart = (m) => m?.kind === 'robot' && (m.part === 'arm_forearm' || m.part === 'gripper');
+      const armMeta = isArmPart(meta1) ? meta1 : isArmPart(meta2) ? meta2 : null;
+      if (!armMeta) return;
+      const otherMeta = armMeta === meta1 ? meta2 : meta1;
+      if (!otherMeta || !WALL_CONTACT_KINDS.has(otherMeta.kind)) return;
+
+      const now = performance.now();
+      if (now - this._lastWallContactAt < WALL_CONTACT_DEBOUNCE_MS) return;
+      this._lastWallContactAt = now;
+      graspEvents.push({ event: 'ARM_CONTACT', object_id: otherMeta.id ?? null, object_class: otherMeta.kind });
+    });
   }
 
   update(dt) {
@@ -110,7 +198,9 @@ export class Arm {
 
     this._syncKinematics(pts);
     this._updateGrasp(pts[3]);
+    this._carryKinematic(pts[3]);
     this._transferCarriedLoad(dt, pts[3]);
+    this._updateEffort();
     this._syncVisuals(pts);
   }
 
@@ -121,8 +211,6 @@ export class Arm {
     this.gripperBody.setNextKinematicTranslation(pts[3]);
   }
 
-  /** Grasp = a real fixed joint to the (still dynamic) item, so carried towels
-   *  keep their mass, drag on furniture and fail on bad geometry. */
   _updateGrasp(fingertip) {
     const closed = isGripperClosed(this.current[5], this.spec);
     if (closed && !this.wasClosed && !this.heldItem) {
@@ -136,42 +224,142 @@ export class Arm {
     this.wasClosed = closed;
   }
 
+  /**
+   * Switch the item to kinematic carry. We drive its body translation directly
+   * each tick instead of using an impulse joint. Eliminates wall-sticking (no
+   * joint pulling the item into wall geometry) and depenetration surprises on
+   * release. Visual scale is morphed to a bunched-cloth shape.
+   */
   _attach(item, fingertip) {
-    const { R, world } = this.physics;
+    const { R } = this.physics;
     const ip = item.body.translation();
-    // Anchor at the current relative pose so the joint never snaps the item.
-    const params = R.JointData.fixed(
-      { x: ip.x - fingertip.x, y: ip.y - fingertip.y, z: ip.z - fingertip.z },
-      item.body.rotation(),
-      { x: 0, y: 0, z: 0 },
-      { w: 1, x: 0, y: 0, z: 0 },
-    );
-    this.graspJoint = world.createImpulseJoint(params, this.gripperBody, item.body, true);
-    // The fingers hold it now — stop the gripper/chassis colliders fighting the
-    // joint (the pan sweep would otherwise drag it through the basket walls).
-    item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff & ~(GROUP_ARM | GROUP_ROBOT)));
+    this._carryOffset = { x: ip.x - fingertip.x, y: ip.y - fingertip.y, z: ip.z - fingertip.z };
+    // Capture the mass BEFORE switching to kinematic — Rapier reports zero mass
+    // for a kinematic body, so the wrist load-cell reading and the chassis load
+    // transfer both need the dynamic-body mass cached here.
+    this._heldMass = item.body.mass();
+    item.body.setBodyType(R.RigidBodyType.KinematicPositionBased, true);
+    item.collider.setCollisionGroups(HELD_GROUPS);
     item.held = true;
     this.heldItem = item;
+    // Crumple the cloth: visual scale AND collider shape, kept after release
+    // (a handled towel stays bunched — this is what lets it fit the collect
+    // bin). ObjectManager.reset() restores the flat shape.
+    item.mesh.scale.copy(GRIP_SCALE);
+    const shape = item.collider.shape;
+    if (!item.crumpled && shape.halfExtents) {
+      item.flatHalfExtents = { ...shape.halfExtents };
+      item.collider.setHalfExtents({
+        x: shape.halfExtents.x * CRUMPLE_SCALE.x,
+        y: shape.halfExtents.y * CRUMPLE_SCALE.y,
+        z: shape.halfExtents.z * CRUMPLE_SCALE.z,
+      });
+      item.crumpled = true;
+    }
+    graspEvents.push({ event: 'GRASP_ACQUIRED', object_id: item.id, object_class: item.cls });
   }
 
   _release() {
-    const item = this.heldItem;
-    this.heldItem = null;
-    if (this.graspJoint) {
-      this.physics.world.removeImpulseJoint(this.graspJoint, true);
-      this.graspJoint = null;
-    }
-    item.collider.setCollisionGroups(groups(GROUP_WORLD, 0xffff));
-    item.held = false;
-    item.body.setLinvel(this.fingertipVel, true);
+    this._endGrasp('GRASP_RELEASED', this.fingertipVel);
   }
 
-  /** The kinematic gripper body absorbs joint forces, so push the carried
-   *  weight back onto the chassis — the suspension visibly settles. */
+  /**
+   * Drive the kinematic held item to follow the fingertip exactly.
+   * Kinematic bodies ignore all physics forces so the item cannot be knocked
+   * loose or dragged into walls while carried.
+   */
+  _carryKinematic(fingertip) {
+    if (!this.heldItem || !this._carryOffset) return;
+    this.heldItem.body.setNextKinematicTranslation({
+      x: fingertip.x + this._carryOffset.x,
+      y: fingertip.y + this._carryOffset.y,
+      z: fingertip.z + this._carryOffset.z,
+    });
+  }
+
+  _endGrasp(event, releaseVel) {
+    const { R } = this.physics;
+    const item = this.heldItem;
+    this.heldItem = null;
+    this._carryOffset = null;
+    this._heldMass = 0;
+
+    // Release-clearance guard: if the fingertip was against/inside static
+    // geometry at the moment of release (e.g. an ARM_CONTACT-aborted
+    // sequence), relocate the item above the robot's own footprint before
+    // switching it back to Dynamic. The robot cannot itself be embedded in a
+    // wall it is contacting with its arm, so this position is always clear —
+    // avoiding the depenetration-ejection this fixed originally.
+    if (this._isEmbeddedInWalls(item)) {
+      const base = this.robot.body.translation();
+      item.body.setNextKinematicTranslation({ x: base.x, y: base.y, z: base.z + 0.35 });
+    }
+
+    // Restore dynamic physics BEFORE restoring collisions so Rapier can solve
+    // the first contact tick correctly without depenetration explosions.
+    item.body.setBodyType(R.RigidBodyType.Dynamic, true);
+    item.collider.setCollisionGroups(FREE_GROUPS);
+    item.held = false;
+    item.body.setLinvel(releaseVel, true);
+    // Stays crumpled — see _attach.
+    graspEvents.push({ event, object_id: item.id, object_class: item.cls });
+  }
+
+  /** Small-ball probe at the item's center: true if it overlaps THICK static
+   *  geometry (walls, platforms, props) an ejected towel could be trapped
+   *  inside. Floor is excluded (a released item legitimately rests on it) and
+   *  so are bin walls: every DROP_BIN release hovers the towel right at the
+   *  2 cm-thin bin rim, which cannot trap it — a rim-straddling towel just
+   *  falls one way or the other once dynamic. Treating bin_wall as "embedded"
+   *  teleported the towel back over the robot at the exact moment of a bin
+   *  drop, making every delivery miss. Item is still kinematic here, so this
+   *  only answers yes/no — no penetration-depth math required. */
+  _isEmbeddedInWalls(item) {
+    const { R, world } = this.physics;
+    const pos = item.body.translation();
+    const TRAPPING_KINDS = new Set(['wall', 'platform', 'prop']);
+    let embedded = false;
+    world.intersectionsWithShape(
+      pos, { w: 1, x: 0, y: 0, z: 0 }, new R.Ball(0.05),
+      (collider) => {
+        const meta = this.physics.metaOf(collider.handle);
+        if (meta && TRAPPING_KINDS.has(meta.kind)) {
+          embedded = true;
+          return false; // stop the query — one hit is enough
+        }
+        return true;
+      },
+    );
+    return embedded;
+  }
+
+  /** Push carried weight back onto the chassis so the suspension visibly settles. */
   _transferCarriedLoad(dt, fingertip) {
     if (!this.heldItem || dt <= 0) return;
-    const m = this.heldItem.body.mass();
-    this.robot.body.applyImpulseAtPoint({ x: 0, y: 0, z: -m * GRAVITY * dt }, fingertip, true);
+    this.robot.body.applyImpulseAtPoint(
+      { x: 0, y: 0, z: -this._heldMass * GRAVITY * dt }, fingertip, true,
+    );
+  }
+
+  /**
+   * Wrist load-cell reading (N): the axial force a wrist-mounted force sensor
+   * measures = the weight of whatever hangs off the gripper (mass * g), and
+   * nothing when empty. Reported on the wrist joint's effort channel.
+   *
+   * This is pose-INDEPENDENT, which is the whole point: shoulder *torque*
+   * (mass * g * horizontal lever arm) genuinely vanishes when the arm lifts the
+   * payload near-vertical — the exact PICK_LIFT pose the pick sequence ends in —
+   * so it is a useless presence sensor there. Payload weight at the wrist is a
+   * real physical quantity a load cell reads regardless of arm configuration.
+   * This is the honest presence signal for a scoop grasp, which (unlike a
+   * two-finger parallel gripper) has no jaw-width to verify a hold with (see
+   * docs/research_notes.md). arm_controller thresholds it into gripper_holding,
+   * closing the loop without any ground-truth shortcut.
+   */
+  _updateEffort() {
+    this.effort.fill(0);
+    if (!this.heldItem) return;
+    this.effort[3] = round3(this._heldMass * GRAVITY);  // wrist_pitch_joint
   }
 
   _syncVisuals(pts) {
@@ -223,3 +411,5 @@ function quatFromYTo(dir) {
   _quat.setFromUnitVectors(_up, _dir);
   return { w: _quat.w, x: _quat.x, y: _quat.y, z: _quat.z };
 }
+
+const round3 = (v) => Math.round(v * 1000) / 1000;

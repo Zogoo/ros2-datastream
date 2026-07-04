@@ -33,6 +33,9 @@ class BaseControllerNode(Node):
         self.create_subscription(String, "/base/command", self._on_command, 50)
         self.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self.create_subscription(Bool, "/safety/stop", self._on_safety, 10)
+        # Collect-bin load cell (strain gauge + HX711 under the bin floor);
+        # the firmware debounce-thresholds the weight into bin_full.
+        self.create_subscription(String, "/robot/bin_load", self._on_bin_load, 10)
 
         self.create_timer(0.05, self._publish_targets)
         self.create_timer(0.10, self._publish_state)
@@ -40,6 +43,13 @@ class BaseControllerNode(Node):
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         self._fw.set_twist(float(msg.linear.x), float(msg.angular.z))
+
+    def _on_bin_load(self, msg: String) -> None:
+        try:
+            kg = float(json.loads(msg.data).get("kg", 0.0))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        self._fw.observe_bin_load(kg)
 
     def _on_safety(self, msg: Bool) -> None:
         if self._fw.set_safety(bool(msg.data)):

@@ -10,6 +10,7 @@ import { OnsenWorld } from './env/layout.js';
 import { ObjectManager } from './env/objects.js';
 import { Steam } from './env/steam.js';
 import { Robot, yawQuat } from './robot/robot.js';
+import { graspEvents } from './robot/arm.js';
 import { LidarSensor } from './sensors/lidar.js';
 import { RgbCamera } from './sensors/rgbCamera.js';
 import { DepthCamera } from './sensors/depthCamera.js';
@@ -42,10 +43,12 @@ async function boot() {
   scene.background = new THREE.Color(0x14161a);
   scene.fog = new THREE.Fog(0x14161a, 14, 30);
 
-  const hemi = new THREE.HemisphereLight(0xfff4e0, 0x33302a, 0.85);
+  // bright enough that the HSV detector keeps color separation (towels stay
+  // low-saturation); onsen interiors are well-lit in reality
+  const hemi = new THREE.HemisphereLight(0xfff4e0, 0x4a463e, 1.6);
   hemi.position.set(0, 0, 1);
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xffe8c0, 1.4);
+  const sun = new THREE.DirectionalLight(0xffe8c0, 1.9);
   sun.position.set(6, -4, 9);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -94,6 +97,28 @@ async function boot() {
   ros.subscribeJson(TOPICS.baseWheelTargets, (m) => {
     if (Array.isArray(m.w)) robot.suspension.setTargets(m.w);
   });
+  // Dump-servo target from the base firmware; the FE applies servo dynamics.
+  ros.subscribeJson(TOPICS.baseState, (m) => {
+    if (m.bin_tilt_target_deg !== undefined) robot.setBinTiltTarget(m.bin_tilt_target_deg);
+  });
+  // Single-active-session guard: ONE ground-truth world at a time. If another
+  // FE session with a NEWER session_id starts heartbeating (an e2e run, a
+  // second tab), this session yields — it mutes all its ROS publishing and
+  // becomes a spectator. Without this, two live tabs interleave two worlds'
+  // ground truth/sensors and the ROS side sees towels teleport every tick.
+  // Reload the page to reclaim the active role.
+  ros.subscribeJson(TOPICS.simStatus, (m) => {
+    if (ros.muted || !m.session_id || m.session_id === groundTruth.sessionId) return;
+    const foreignTs = parseInt(String(m.session_id).split('-')[0], 36);
+    const ourTs = parseInt(groundTruth.sessionId.split('-')[0], 36);
+    const foreignNewer = foreignTs > ourTs
+      || (foreignTs === ourTs && String(m.session_id) > groundTruth.sessionId);
+    if (foreignNewer) {
+      ros.muted = true;
+      hud.ticker('SPECTATOR — a newer session took over publishing (reload to reclaim)');
+      console.warn('[sim] muted: newer FE session', m.session_id, 'took over');
+    }
+  });
   ros.subscribe(TOPICS.safetyStop, (m) => {
     robot.safetyStop = !!m.data;
   });
@@ -112,6 +137,8 @@ async function boot() {
   let fps = 60;
   let lastFrame = performance.now();
   const dt = 1 / config.physicsHz;
+  let _prevHeldId = null;  // tracks last-published held_object id to publish only on change
+  let _binLoadAccum = 0;   // 2 Hz cadence for the bin load-cell reading
 
   function frame(now) {
     const frameDelta = now - lastFrame;
@@ -124,6 +151,7 @@ async function boot() {
       objects.update(dt);
       physics.step();
       contacts.update();
+      robot.arm.drainWallContacts();
       lidar.update();
       imu.update(dt);
       odom.update(dt);
@@ -143,6 +171,45 @@ async function boot() {
     });
     groundTruth.update(renderDt, fps);
     controls.update(renderDt);
+
+    while (graspEvents.length) {
+      const event = graspEvents.shift();
+      ros.publish(TOPICS.events, {
+        data: JSON.stringify({ ...event, timestamp: new Date().toISOString() }),
+      });
+      hud.ticker(`${event.event} ${event.object_id}`);
+    }
+
+    // Bin load cell (strain gauge + HX711 on the real robot): total weight of
+    // whatever rests in the collect bin, published at the HX711-ish 2 Hz with
+    // sensor noise. The base firmware thresholds this into bin_full.
+    _binLoadAccum += renderDt;
+    if (_binLoadAccum >= 0.5) {
+      _binLoadAccum %= 0.5;
+      const load = robot.binLoad();
+      const noise = (Math.random() - 0.5) * 2 * (spec.basket.load_cell?.noise_kg ?? 0.005);
+      ros.publish(TOPICS.binLoad, {
+        data: JSON.stringify({
+          kg: Math.max(0, Math.round((load.kg + noise) * 1000) / 1000),
+          count: load.count,
+          tilt_deg: Math.round(robot.binTilt),
+        }),
+      });
+    }
+
+    // Publish held-object state whenever the held item changes.
+    // Represents a combined gripper-width + payload sensor: tells the mission
+    // node what class of object is in the gripper without requiring camera vision.
+    const _curHeldId = robot.arm.heldItem?.id ?? null;
+    if (_curHeldId !== _prevHeldId) {
+      _prevHeldId = _curHeldId;
+      const info = robot.arm.heldObjectInfo();
+      ros.publish(TOPICS.heldObject, {
+        data: JSON.stringify(info
+          ? { held: true, ...info, timestamp: new Date().toISOString() }
+          : { held: false, timestamp: new Date().toISOString() }),
+      });
+    }
 
     for (const event of objects.drainBinnedEvents()) {
       ros.publish(TOPICS.events, {
@@ -166,6 +233,7 @@ async function boot() {
       robot.body.setRotation(yawQuat(yaw), true);
       robot.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
       robot.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      odom.reset(x, y, yaw);  // keep odometry consistent with the teleport
     },
     setVelocity(vx, vy) {
       robot.body.setLinvel({ x: vx, y: vy, z: 0 }, true);
@@ -181,6 +249,24 @@ async function boot() {
       return { x: p.x, y: p.y, z: p.z, held: item.held, binned: item.binned };
     },
     holding: () => robot.arm.holding(),
+    muted: () => !!ros.muted,
+    armFingertip: () => robot.arm.fkWorld?.[3] ?? null,
+    depthStats: () => {
+      const px = camDepth.pixels;
+      const mm = camDepth.depthMm;
+      let rawNonBg = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        if (px[i] !== px[4] || px[i + 1] !== px[5] || px[i + 2] !== px[6]) rawNonBg++;
+      }
+      let mmNonZero = 0;
+      let mmMax = 0;
+      for (let i = 0; i < mm.length; i += 2) {
+        const v = mm[i] | (mm[i + 1] << 8);
+        if (v > 0) mmNonZero++;
+        if (v > mmMax) mmMax = v;
+      }
+      return { rawSample: Array.from(px.slice(0, 16)), rawNonBg, mmNonZero, mmMax };
+    },
     safetyStop: () => robot.safetyStop,
     fps: () => fps,
     world,

@@ -5,6 +5,11 @@ Topics:
   /arm/response       std_msgs/String  out  firmware reply lines
   /arm/joint_targets  std_msgs/String  out  JSON {"deg":[6], "status", "ts"} @ 20 Hz
   /arm/state          std_msgs/String  out  JSON firmware state @ 10 Hz
+  /joint_states       sensor_msgs/JointState  in   measured joints; wrist
+                      load-cell effort feeds ArmFirmware.observe_effort ->
+                      gripper_holding in /arm/state (a real force-sensing
+                      feedback channel, not a ground-truth shortcut — see
+                      arm_protocol.py)
 """
 from __future__ import annotations
 
@@ -14,11 +19,15 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
 from .arm_protocol import ArmFirmware
 
 CAL_PATH = os.environ.get("ARM_CAL_PATH", "/ros2_ws/output/arm_calibration.json")
+# The FE reports the payload weight (mass * g) on the wrist joint's effort
+# channel — the pose-independent wrist load-cell reading (see arm.js).
+WRIST_JOINT_NAME = "wrist_pitch_joint"
 
 
 class ArmControllerNode(Node):
@@ -30,10 +39,19 @@ class ArmControllerNode(Node):
         self._pub_targets = self.create_publisher(String, "/arm/joint_targets", 10)
         self._pub_state = self.create_publisher(String, "/arm/state", 10)
         self.create_subscription(String, "/arm/command", self._on_command, 50)
+        self.create_subscription(JointState, "/joint_states", self._on_joint_states, 10)
 
         self.create_timer(0.05, self._tick)        # 20 Hz interpolation + targets
         self.create_timer(0.10, self._publish_state)
         self.get_logger().info("ArmControllerNode ready — /arm/command accepted")
+
+    def _on_joint_states(self, msg: JointState) -> None:
+        try:
+            idx = msg.name.index(WRIST_JOINT_NAME)
+        except ValueError:
+            return
+        if idx < len(msg.effort):
+            self._fw.observe_effort(msg.effort[idx])
 
     def _on_command(self, msg: String) -> None:
         for line in msg.data.splitlines():

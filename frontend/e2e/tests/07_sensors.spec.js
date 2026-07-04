@@ -11,11 +11,14 @@ test('sensors: lidar/cameras/depth/sonar/imu publish at healthy rates', async ({
   probe.subscribe('/camera/front/image_raw/compressed', 200);
   probe.subscribe('/camera/rear/image_raw/compressed', 200);
   probe.subscribe('/camera/depth/image_raw', 200);
+  probe.subscribe('/scan_low', 200);
 
   await bootSim(page);
   await setManual(page); // keep the mission executor's hands off the base
-  // park in the corridor facing the west cold bath: rim 1.3 m ahead, below the scan plane
-  await page.evaluate(() => window.__sim.setPose(-0.9, -3.8, Math.PI));
+  // park in the corridor facing the west cold bath: rim ahead, below the scan
+  // plane. Pose places the LIDAR (front-right corner mast since the top-deck
+  // bin redesign) on the same sightline the original rear-center mast had.
+  await page.evaluate(() => window.__sim.setPose(-0.44, -3.95, Math.PI));
 
   await sleep(10_000);
 
@@ -48,6 +51,23 @@ test('sensors: lidar/cameras/depth/sonar/imu publish at healthy rates', async ({
   expect(depth.width).toBe(320);
   expect(depth.height).toBe(240);
   expect(depth.encoding).toBe('16UC1');
+
+  // content, not just shape: the rim ahead must yield real metric depths
+  // (regression guard for the RGBADepthPacking channel-order bug)
+  const bytes = Buffer.from(depth.data, 'base64');
+  let valid = 0;
+  for (let i = 0; i < bytes.length; i += 2) {
+    const mm = bytes[i] | (bytes[i + 1] << 8);
+    if (mm >= 280 && mm <= 3000) valid++;
+  }
+  expect(valid, 'depth frame must contain measured pixels').toBeGreaterThan(5000);
+
+  // /scan_low (depth-derived low-obstacle layer) must see the 0.28 m rim
+  // that the lidar plane cannot
+  const low = probe.received('/scan_low').at(-1);
+  const finiteLow = low.ranges.filter((r) => r !== null && Number.isFinite(r));
+  expect(finiteLow.length, '/scan_low must return low obstacles').toBeGreaterThan(3);
+  expect(Math.min(...finiteLow)).toBeLessThan(2.0);
 
   probe.close();
 });

@@ -25,12 +25,52 @@ autonomy.
 │ base_controller      wheel firmware: /base/command, /cmd_vel -> wheel targets  │
 │ arm_controller       serial firmware: /arm/command -> joint targets           │
 │ robot_state          safety fusion: contacts/imu/scan -> /safety/stop latch    │
-│ ai_worker            HSV detection + planner -> /detected_objects, /task_plan │
-│ mission_executor     autonomy loop -> /cmd_vel/auto + /arm/command sequences   │
+│ nav_static_tf        /tf_static tree from robot_spec                           │
+│ localizer            likelihood-field scan match -> map->odom, /localization   │
+│ depth_scan           depth camera -> /scan_low (low obstacles)                 │
+│ nav_server           A* + regulated pure pursuit: /nav/goal -> /cmd_vel/auto   │
+│ ai_worker            detection + depth ranging + planner -> /detected_objects  │
+│ towel_tracker        detections -> /perception/towel_tracks (map frame)        │
+│ arm_description      URDF + coupled joints -> robot_state_publisher TF         │
+│ mission_executor     autonomy FSM -> /nav/goal + analytic-IK /arm/command      │
 │ dummy_robot          SIM_SOURCE=fe|synthetic|replay headless source           │
+│ eval (profile)       ONLY ground-truth consumer -> /eval/metrics               │
 │ rosbridge / foxglove_bridge / rosbag record + play                             │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Autonomy stack (AUTO mode, ground truth out of the control path)
+
+```
+/scan ─────────────► localizer ──► map->odom TF ──► /localization/pose ─┐
+layout map (A* grid)                                                     ├─► mission_executor (FSM)
+/camera/* ─► ai_worker (HSV + depth range + height gate) ─► /detected_objects   │     │
+                                       └─► towel_tracker ─► /perception/towel_tracks ┘     │
+                                                                          nav goals │     │ IK reach
+                                                                                    ▼     ▼
+                                                          nav_server (A* + pure pursuit)  arm_controller
+                                                                 │                            │
+                                                                 └──► /cmd_vel/auto ──► arbitrator ──► base
+```
+
+- **Localization**: likelihood-field scan matching against a map rasterized
+  deterministically from `shared/onsen_layout.json`. Corrects the drifting
+  `/odom` into a `map->odom` transform. (AMCL's measurement model, hill-climb
+  instead of a particle filter — the start pose is known.)
+- **Perception**: the HSV detector's bbox + the depth image give a metric towel
+  range (back-projection through the depth intrinsics); a height gate uses that
+  range to separate flat towels from stools/buckets that share the warm palette.
+  The tracker keeps only depth-confirmed towels as stable map-frame targets.
+- **Navigation**: A* on the inflated occupancy grid (pools are lethal keepout) +
+  regulated pure pursuit, exposed as a NavigateToPose-shaped goal/status seam.
+- **Manipulation**: a closed-form analytic IK solver (pan + isosceles planar 2R
+  + wrist, exact for the servo coupling) reaches the *measured* towel pose; the
+  gripper closes in place. Validated against the FE FK to machine precision.
+
+Why in-house rather than Nav2/MoveIt: neither is packaged for the `lyrical`
+distro (verified in Phase 0). The algorithms here are the published methods
+those frameworks implement, behind seam-compatible interfaces — see
+`docs/research_notes.md` for the comparison and the IK derivation.
 
 ## Control path (one owner per topic)
 

@@ -100,9 +100,56 @@ make check-py   # ruff + mypy + pytest in the ROS image
 - e2e scenario 6 — full safety loop through the live stack (ram a stool ->
   latch -> wheels zero -> operator reset -> recover)
 
+## Navigation (`onsen_nav`)
+
+The autonomy stack plans its own motion — no teleop, no ground truth. Four
+nodes, all pure-logic cores with thin ROS wrappers (so the math is unit-tested
+without ROS):
+
+- `grid.py` rasterizes `shared/onsen_layout.json` into two grids: a **planner
+  grid** (walls + furniture + pools-as-keepout, inflated by the robot radius)
+  and a **field grid** (only what the 0.62 m lidar plane sees) for matching.
+- `astar.py` — 8-connected A* + octile heuristic + line-of-sight shortcutting.
+- `pure_pursuit.py` — regulated pure pursuit (curvature + approach regulation,
+  rotate-to-heading), the Nav2 RPP rules at our 8 Hz cadence.
+- `scan_matcher.py` — likelihood-field matching (AMCL measurement model) with a
+  coarse-to-fine hill climb for the `map->odom` correction.
+
+Goal interface (seam-compatible with `nav2_msgs/NavigateToPose` so real Nav2
+can drop in later): publish JSON `{x, y, yaw}` to `/nav/goal`, watch
+`/nav/status`. The server drives `/cmd_vel/auto` and is preempted by manual
+mode / safety stop.
+
+## Manipulation IK (`onsen_ai_worker/arm_kinematics.py`)
+
+The arm is a planar 3R chain (shoulder/elbow/wrist pitch) on a pan joint with a
+fixed servo→joint coupling (`joint_ratio` 1.5). That makes **closed-form IK
+exact** — and exactness is why we don't wrap KDL/TRAC-IK (they can't express the
+coupling without a mimic-joint hack; full derivation + plugin comparison in
+`docs/research_notes.md`). `ArmModel.ik(target)` returns 6 servo degrees:
+
+1. pan = `atan2(ty, tx − base_x)`; reduce to the (radial, z) plane
+2. subtract the wrist link along the chosen tool tilt t3 (scoop band 95–120°)
+3. isosceles 2R: `α = acos(D / (L1+L2))`, elbow-up branch
+4. back-substitute through the 1.5 coupling to servo degrees, reject if any
+   joint leaves [0, 180]
+5. scan t3 for the smoothest feasible solution, then a damped-least-squares
+   polish
+
+The mission feeds the *measured* towel position (depth-refined, base_link) to
+`ik()` and emits the resulting `J` firmware line — so the arm reaches where the
+towel actually is, then closes the gripper in place (`A CLOSE_GRIPPER`), rather
+than replaying a fixed pose. `test_arm_kinematics.py` asserts IK→FK round-trips
+to < 1e-9 m against the simulator's own FK.
+
+The URDF (`onsen_arm`) feeds robot_state_publisher for the arm TF tree; a joint
+bridge applies the coupling so RViz/Foxglove match the FE. `move_group` is not
+packaged for this distro — the analytic solver is the runtime planner.
+
 ## Invariants
 
 - `FASTDDS_BUILTIN_TRANSPORTS: UDPv4` in every ROS container
 - rosbridge without `use_events_executor`
 - One `/cmd_vel` owner (the arbitrator); firmware nodes never bypass it
 - `/safety/stop` consumers must treat it as unconditional
+- Ground truth (`/ground_truth/*`) is eval-only — only `eval_node` subscribes
