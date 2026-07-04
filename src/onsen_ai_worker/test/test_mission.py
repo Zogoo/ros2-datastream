@@ -701,3 +701,38 @@ class TestArmContact:
                 parked = True
                 break
         assert parked
+
+
+class TestAlignHysteresis:
+    """Regression: ALIGN_PICK's single 0.12 rad rotate threshold made the
+    skid-steer hunt left-right around it (rotate, overshoot, rotate back) —
+    the visible close-range wiggling. With hysteresis the FSM keeps rotating
+    below the entry threshold until the error is truly small."""
+
+    def _logic_with_towel_at_bearing(self, bearing_rad):
+        import math as m
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "ALIGN_PICK"
+        d = 1.0
+        logic.target = towel(d * m.cos(bearing_rad), d * m.sin(bearing_rad))
+        return logic
+
+    def test_keeps_rotating_below_entry_threshold_once_started(self):
+        logic = self._logic_with_towel_at_bearing(0.20)   # above entry -> rotate
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        out = logic.update(make_input(pose, [logic.target]))
+        assert out.reason == "aligning bearing"
+        # bearing now 0.08: between exit (0.05) and entry (0.12) -> STILL rotating
+        logic.target = towel(math.cos(0.08), math.sin(0.08))
+        out = logic.update(make_input(pose, [logic.target]))
+        assert out.reason == "aligning bearing", "must not flip to driving mid-band"
+        # below exit threshold -> switches to closing the gap
+        logic.target = towel(math.cos(0.03), math.sin(0.03))
+        out = logic.update(make_input(pose, [logic.target]))
+        assert "closing gap" in out.reason
+
+    def test_no_rotation_when_starting_inside_band(self):
+        logic = self._logic_with_towel_at_bearing(0.08)   # inside band, not aligning
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        out = logic.update(make_input(pose, [logic.target]))
+        assert "closing gap" in out.reason, "band entry without prior rotation drives"

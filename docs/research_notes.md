@@ -202,6 +202,36 @@ the map. >2 bumps on one goal -> the goal fails and the mission's retry/park
 logic takes over. Before this, a physical wedge just ran out the 8 s blocked
 timer ("robot hits object and loses navigation").
 
+## Dynamic obstacle layer + 360° bumper ring (the wiggle fix)
+
+Symptom: in a cluttered room the robot oscillated in place, driving at an
+unmapped stool, blocking, backing up, and replanning the IDENTICAL path
+through it — A* only knew the static map, so every recovery replayed the same
+collision. This is exactly the gap Nav2 fills with costmap obstacle layers.
+
+Fix, two halves:
+1. **DynamicLayer** (`onsen_nav/grid.py`): a decaying obstacle memory. Marked
+   from (a) the closest unmapped scan/scan_low return whenever the tracker
+   reports blocked, and (b) bumper hits. Marks inflate like static walls and
+   expire after 30 s (movable clutter moves — a stale mark must not wall off
+   a room). `_plan` runs on `dyn.overlay(inflated)`, so the recovery replan
+   routes AROUND what stopped us. Live: one retry instead of infinite wiggle.
+2. **360° bumper ring** (`robot.js` + `contacts.js`): a PHYSICAL 8-segment
+   ring (4 faces + 4 corners) stands 12 mm proud of the skirt at z 0.085 —
+   its colliders are the robot's outermost surface, so any push-back is taken
+   by the bumper first, and the struck segment flashes orange in the FE. The
+   sensor resolves WHICH
+   sector was hit from the contact force direction (the world pushes the
+   robot away from the obstacle, so the obstacle bears opposite the received
+   force) — 8 sectors, `bumper_front` … `bumper_rear_right`, plus the raw
+   `bearing_deg`. The nav server escapes directly away from the reported
+   bearing (rear hits pull forward) and stamps the bump point into the
+   DynamicLayer. This is the Roomba loop — touch, recoil, remember, reroute —
+   with a map underneath it.
+
+Also: ALIGN_PICK rotation now has hysteresis (enter 0.12 rad / exit 0.05) —
+the single threshold made the skid-steer hunt left-right at close range.
+
 ## Collect bin: load cell + tilt dump (open hardware)
 
 Load sensing: single-point strain-gauge load cell + HX711 24-bit amplifier —

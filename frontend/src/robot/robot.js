@@ -41,6 +41,7 @@ export class Robot {
     physics.registerMeta(this.tubCollider, { kind: 'robot', part: 'chassis' });
 
     this._buildBasketColliders();
+    this._buildBumperRing();
     this.suspension = new WheelSuspension(physics, this.body, spec);
     this.arm = new Arm(physics, this, spec.arm, objects);
 
@@ -89,6 +90,63 @@ export class Robot {
       this.physics.registerMeta(col, { kind: 'robot', part: 'basket' });
       this.binColliders.push({ col, local: [...pos] });
     }
+  }
+
+  /** 360° physical bumper ring (Roomba-style): 8 segments — 4 faces + 4
+   *  corners — standing 12 mm proud of the skirt at z 0.085. These colliders
+   *  are the robot's outermost surface, so any push-back is taken by the
+   *  bumper FIRST; the contact-force direction resolves which segment
+   *  (micro-switch) fired. Segment meshes flash on a hit so the trigger is
+   *  visible in the FE. */
+  _buildBumperRing() {
+    const c = this.spec.chassis;
+    const hx = c.size[0] / 2 + 0.012;   // standoff from the chassis shell
+    const hy = c.size[1] / 2 + 0.012;
+    const t = 0.02;                      // ring thickness
+    const h = 0.05;                      // band height
+    const z = 0.085 - BASE_Z;
+    const cornerLen = 0.11;
+    // [sector, cx, cy, sizeX, sizeY, yawDeg]
+    this.bumperLayout = [
+      ['front', hx, 0, t, c.size[1] * 0.62, 0],
+      ['rear', -hx, 0, t, c.size[1] * 0.62, 0],
+      ['left', 0, hy, c.size[0] * 0.62, t, 0],
+      ['right', 0, -hy, c.size[0] * 0.62, t, 0],
+      ['front_left', hx - 0.045, hy - 0.045, t, cornerLen, -45],
+      ['front_right', hx - 0.045, -(hy - 0.045), t, cornerLen, 45],
+      ['rear_left', -(hx - 0.045), hy - 0.045, t, cornerLen, 45],
+      ['rear_right', -(hx - 0.045), -(hy - 0.045), t, cornerLen, -45],
+    ];
+    for (const [sector, cx, cy, sx, sy, yawDeg] of this.bumperLayout) {
+      void sector;
+      const desc = this.physics.R.ColliderDesc.cuboid(sx / 2, sy / 2, h / 2)
+        .setTranslation(cx, cy, z)
+        .setRotation({
+          w: Math.cos((yawDeg * Math.PI) / 360), x: 0, y: 0, z: Math.sin((yawDeg * Math.PI) / 360),
+        })
+        .setMass(0.05)
+        .setFriction(0.1)
+        .setCollisionGroups(groups(GROUP_ROBOT, GROUP_WORLD | GROUP_OBJECT))
+        .setActiveEvents(this.physics.R.ActiveEvents.CONTACT_FORCE_EVENTS)
+        .setContactForceEventThreshold(0.5);
+      const col = this.physics.world.createCollider(desc, this.body);
+      this.physics.registerMeta(col, { kind: 'robot', part: 'bumper' });
+    }
+  }
+
+  /** Visual feedback for a bumper hit: flash the struck segment. */
+  flashBumper(sector) {
+    const seg = this.bumperMeshes?.[sector];
+    if (!seg) return;
+    seg.material.color.setHex(0xff7a1a);
+    seg.material.emissive.setHex(0xff7a1a);
+    seg.material.emissiveIntensity = 0.9;
+    clearTimeout(seg.userData.flashTimer);
+    seg.userData.flashTimer = setTimeout(() => {
+      seg.material.color.setHex(0x1c1c1f);
+      seg.material.emissive.setHex(0x000000);
+      seg.material.emissiveIntensity = 0;
+    }, 400);
   }
 
   setBinTiltTarget(deg) {
@@ -172,6 +230,18 @@ export class Robot {
     );
     skirt.position.z = lz(0.08);
     g.add(skirt);
+
+    // 360° bumper ring: one mesh per segment (matches the collider layout),
+    // visibly proud of the skirt; flashBumper() lights the struck segment.
+    this.bumperMeshes = {};
+    for (const [sector, cx, cy, sx, sy, yawDeg] of this.bumperLayout) {
+      const mat = new THREE.MeshStandardMaterial({ color: 0x1c1c1f, roughness: 0.5 });
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, 0.05), mat);
+      seg.position.set(cx, cy, lz(0.085));
+      seg.rotation.z = (yawDeg * Math.PI) / 180;
+      g.add(seg);
+      this.bumperMeshes[sector] = seg;
+    }
 
     this.ledMat = new THREE.MeshStandardMaterial({
       color: LED_COLORS.idle, emissive: LED_COLORS.idle, emissiveIntensity: 1.2,

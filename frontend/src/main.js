@@ -101,6 +101,24 @@ async function boot() {
   ros.subscribeJson(TOPICS.baseState, (m) => {
     if (m.bin_tilt_target_deg !== undefined) robot.setBinTiltTarget(m.bin_tilt_target_deg);
   });
+  // Single-active-session guard: ONE ground-truth world at a time. If another
+  // FE session with a NEWER session_id starts heartbeating (an e2e run, a
+  // second tab), this session yields — it mutes all its ROS publishing and
+  // becomes a spectator. Without this, two live tabs interleave two worlds'
+  // ground truth/sensors and the ROS side sees towels teleport every tick.
+  // Reload the page to reclaim the active role.
+  ros.subscribeJson(TOPICS.simStatus, (m) => {
+    if (ros.muted || !m.session_id || m.session_id === groundTruth.sessionId) return;
+    const foreignTs = parseInt(String(m.session_id).split('-')[0], 36);
+    const ourTs = parseInt(groundTruth.sessionId.split('-')[0], 36);
+    const foreignNewer = foreignTs > ourTs
+      || (foreignTs === ourTs && String(m.session_id) > groundTruth.sessionId);
+    if (foreignNewer) {
+      ros.muted = true;
+      hud.ticker('SPECTATOR — a newer session took over publishing (reload to reclaim)');
+      console.warn('[sim] muted: newer FE session', m.session_id, 'took over');
+    }
+  });
   ros.subscribe(TOPICS.safetyStop, (m) => {
     robot.safetyStop = !!m.data;
   });
@@ -231,6 +249,7 @@ async function boot() {
       return { x: p.x, y: p.y, z: p.z, held: item.held, binned: item.binned };
     },
     holding: () => robot.arm.holding(),
+    muted: () => !!ros.muted,
     armFingertip: () => robot.arm.fkWorld?.[3] ?? null,
     depthStats: () => {
       const px = camDepth.pixels;

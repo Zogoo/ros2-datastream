@@ -90,7 +90,7 @@ REACH_OVERSHOOT_M = 0.15
 # radius the nav server plans with (nav_server_node.ROBOT_RADIUS) — a smaller
 # value here approves wall-adjacent standoffs the planner can never reach,
 # deadlocking APPROACH on an unplannable goal.
-STANDOFF_ROBOT_RADIUS = 0.36
+STANDOFF_ROBOT_RADIUS = 0.40
 
 
 def _make_reach_clear():

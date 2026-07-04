@@ -45,6 +45,8 @@ DELIVER_OFFSET = (0.28, 0.66)  # m, DROP_BIN release point in base_link
 PICK_TOL_X = 0.08
 PICK_TOL_Y = 0.08
 YAW_TOL = 0.08
+ALIGN_ENTER_RAD = 0.12   # start rotating toward the towel above this bearing error
+ALIGN_EXIT_RAD = 0.05    # keep rotating until under this (hysteresis kills hunting)
 RETARGET_DIST = 0.4       # m a towel must drift before the nav goal is re-issued
 MAX_APPROACH_RETRIES = 3
 NAV_LIMBO_TICKS = 4       # sustained failed/cancelled without ever seeing active
@@ -150,6 +152,7 @@ class MissionLogic:
         self._retries = 0
         self._was_active = False  # saw nav_status==active since the goal was emitted
         self._nav_limbo = 0       # ticks of terminal status without ever seeing active
+        self._aligning = False    # ALIGN_PICK rotation hysteresis state
         # Per-target pick-attempt accounting: a towel that can't be grasped
         # (mislocated, unreachable, occluded) is parked so the arm stops looping
         # on it. Parked targets are retried after PARK_TICKS so a transient
@@ -270,11 +273,16 @@ class MissionLogic:
             self.state = "PICK"
             self._seq = _SeqState(commands=self._build_pick_sequence(rel))
             return MissionOutput(state="ALIGN_PICK", twist=(0.0, 0.0), reason="in pick window")
-        # bearing first, then close the longitudinal gap — gentle, low speed
+        # bearing first, then close the longitudinal gap — gentle, low speed.
+        # Rotation uses HYSTERESIS (enter at 0.12 rad, exit at 0.05): a single
+        # threshold made the skid-steer hunt left-right around it (servo lag +
+        # 5 Hz ticks overshoot the boundary), visible as close-range wiggling.
         bearing = wrap_angle(math.atan2(rel[1], rel[0]))
-        if abs(bearing) > 0.12:
+        if abs(bearing) > ALIGN_ENTER_RAD or (self._aligning and abs(bearing) > ALIGN_EXIT_RAD):
+            self._aligning = True
             wz = max(-0.5, min(0.5, 1.5 * bearing))
             return MissionOutput(state="ALIGN_PICK", twist=(0.0, wz), reason="aligning bearing")
+        self._aligning = False
         vx = max(-0.08, min(0.10, 0.4 * (rel[0] - SCOOP_FORWARD)))
         return MissionOutput(state="ALIGN_PICK", twist=(vx, 0.0),
                              reason=f"closing gap rel_x={rel[0]:.2f}")

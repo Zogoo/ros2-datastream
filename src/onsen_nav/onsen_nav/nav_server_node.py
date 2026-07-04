@@ -35,7 +35,7 @@ from std_msgs.msg import Bool, String
 from onsen_robot_state import topics
 
 from .astar import plan_path
-from .grid import NavGrid
+from .grid import DynamicLayer, NavGrid
 from .pure_pursuit import PurePursuit, TrackerParams, wrap_angle
 
 SENSOR_QOS = QoSProfile(
@@ -51,10 +51,11 @@ LATCHED_QOS = QoSProfile(
 )
 
 LAYOUT_PATH = os.environ.get("ONSEN_LAYOUT_PATH", "/ros2_ws/shared/onsen_layout.json")
-# Planner footprint: the collect bin overhangs to 0.34 m laterally / 0.41 m at
-# the front-left corner. 0.36 covers translation along the path with margin;
-# the (rarer) rotate-in-place near a corner is backstopped by bumper recovery.
-ROBOT_RADIUS = 0.36
+# Planner footprint: circumscribed radius INCLUDING the bumper ring (~0.39 at
+# the ring corners) — inflation must cover rotate-in-place anywhere on a
+# planned path, or turning near a wall grinds the ring corner into it (bumper
+# feedback loop: hit -> escape restarted by the next hit -> stuck).
+ROBOT_RADIUS = 0.40
 YAW_TOLERANCE = 0.10
 BLOCKED_FAIL_S = 8.0
 BLOCKED_RECOVER_S = 3.0      # blocked this long -> try one recovery before giving up
@@ -76,6 +77,10 @@ class NavServerNode(Node):
         super().__init__("nav_server_node")
         self._grid = NavGrid.from_file(LAYOUT_PATH)
         self._inflated = self._grid.inflated(ROBOT_RADIUS)
+        # Obstacle memory for things the static map doesn't know — marked on
+        # tracker blocks and bumper hits so the NEXT plan routes around them
+        # (without it, recovery replanned through the same stool forever).
+        self._dyn = DynamicLayer(self._grid, ROBOT_RADIUS + 0.05)
         self._tracker = PurePursuit(TrackerParams())
 
         self._goal: dict | None = None
@@ -89,13 +94,16 @@ class NavServerNode(Node):
         self._recovering_until: float | None = None
         self._recovered_once = False
         self._recover_v = RECOVER_BACKUP_V  # escape velocity of the active recovery
+        self._recover_wz = 0.0               # turn-away component for side bumps
         self._bumps = 0                      # bumper hits on the current goal
         self._last_cmd_vx = 0.0              # sign picks the bumper-escape direction
 
         self._pose: tuple[float, float, float] | None = None
         self._pose_at = 0.0
         self._min_front: float | None = None
+        self._min_front_pos: tuple[float, float] | None = None
         self._min_low: float | None = None
+        self._min_low_pos: tuple[float, float] | None = None
         self._mode = "auto"
         self._safety = False
 
@@ -169,6 +177,7 @@ class NavServerNode(Node):
         mid = n // 2
         x, y, yaw = self._pose
         best = None
+        best_pos = None
         for i in range(mid - window, mid + window):
             r = msg.ranges[i]
             if r is None or not (msg.range_min < r < msg.range_max):
@@ -180,17 +189,33 @@ class NavServerNode(Node):
                 continue
             if best is None or r < best:
                 best = r
+                best_pos = (hx, hy)
         self._min_front = best
+        self._min_front_pos = best_pos
 
     def _on_scan_low(self, msg: LaserScan) -> None:
         # forward cone only (±20°): a towel beside the path must not stall us
         cone = math.radians(20.0)
-        valid = [
-            r for i, r in enumerate(msg.ranges)
-            if r is not None and msg.range_min < r < msg.range_max
-            and abs(msg.angle_min + i * msg.angle_increment) < cone
-        ]
-        self._min_low = min(valid) if valid else None
+        best = None
+        best_rel = None
+        for i, r in enumerate(msg.ranges):
+            if r is None or not (msg.range_min < r < msg.range_max):
+                continue
+            a = msg.angle_min + i * msg.angle_increment
+            if abs(a) >= cone:
+                continue
+            if best is None or r < best:
+                best = r
+                best_rel = (r, a)
+        self._min_low = best
+        if best_rel is not None and self._pose is not None:
+            x, y, yaw = self._pose
+            self._min_low_pos = (
+                x + best_rel[0] * math.cos(yaw + best_rel[1]),
+                y + best_rel[0] * math.sin(yaw + best_rel[1]),
+            )
+        else:
+            self._min_low_pos = None
 
     def _on_mode(self, msg: String) -> None:
         try:
@@ -219,9 +244,16 @@ class NavServerNode(Node):
             contact = json.loads(msg.data)
         except json.JSONDecodeError:
             return
-        if not str(contact.get("part", "")).startswith("chassis"):
+        part = str(contact.get("part", ""))
+        if not (part.startswith("bumper") or part.startswith("chassis")):
             return
         if float(contact.get("impulse", 0.0) or 0.0) < BUMP_MIN_IMPULSE:
+            return
+        # One escape at a time: while a recovery is running, further scrapes
+        # are the same event (the ring is still leaving the surface).
+        # Restarting the escape on every 150 ms contact report froze the
+        # robot against the wall it was escaping from.
+        if self._recovering_until is not None and self._now() < self._recovering_until:
             return
         self._bumps += 1
         if self._bumps > MAX_BUMPS_PER_GOAL:
@@ -230,14 +262,33 @@ class NavServerNode(Node):
             )
             self._finish("failed")
             return
-        # Escape opposite the direction we were driving when we hit.
-        self._recover_v = -BUMP_BACKUP_V if self._last_cmd_vx >= 0 else BUMP_BACKUP_V
-        self._recovering_until = self._now() + BUMP_BACKUP_S
+        # The 360° bumper ring reports the obstacle's body-frame bearing —
+        # remember it in the dynamic layer so the replan avoids it, and escape
+        # directly away from it (rear sectors -> pull forward).
+        bearing = contact.get("bearing_deg")
+        now = self._now()
+        if bearing is not None and self._pose is not None:
+            world_b = self._pose[2] + math.radians(float(bearing))
+            self._dyn.mark(
+                self._pose[0] + (ROBOT_RADIUS + 0.10) * math.cos(world_b),
+                self._pose[1] + (ROBOT_RADIUS + 0.10) * math.sin(world_b),
+                now,
+            )
+            obstacle_ahead = abs(float(bearing)) < 90.0
+            # Side hits: also twist AWAY from the obstacle while escaping, or
+            # a straight escape keeps grazing the wall with the ring corner.
+            side = math.sin(math.radians(float(bearing)))
+            self._recover_wz = -0.3 * (1 if side > 0.3 else -1 if side < -0.3 else 0)
+        else:
+            obstacle_ahead = self._last_cmd_vx >= 0
+            self._recover_wz = 0.0
+        self._recover_v = -BUMP_BACKUP_V if obstacle_ahead else BUMP_BACKUP_V
+        self._recovering_until = now + BUMP_BACKUP_S
         self._path = None            # replan from the escaped pose
         self._blocked_since = None
         self.get_logger().info(
-            f"Bumper hit ({contact.get('object_id')}) — "
-            f"escaping {self._recover_v:+.2f} m/s, replanning",
+            f"Bumper {part} hit ({contact.get('object_id')}) — "
+            f"escaping {self._recover_v:+.2f} m/s, marked + replanning",
         )
 
     # ── control loop ──────────────────────────────────────────────────────────
@@ -251,11 +302,12 @@ class NavServerNode(Node):
         now = self._now()
         if self._recovering_until is not None:
             if now < self._recovering_until:
-                self._publish_twist(self._recover_v, 0.0)
+                self._publish_twist(self._recover_v, self._recover_wz)
                 return
             # Escape finished — force a fresh plan from the escaped pose.
             self._recovering_until = None
             self._recover_v = RECOVER_BACKUP_V
+            self._recover_wz = 0.0
             self._path = None
             self._blocked_since = None
 
@@ -271,6 +323,11 @@ class NavServerNode(Node):
         self._distance = out.distance_remaining
 
         if out.blocked:
+            # Remember WHAT blocked us: stamp the closest unmapped return into
+            # the dynamic layer so the recovery replan routes AROUND it.
+            for pos in (self._min_front_pos, self._min_low_pos):
+                if pos is not None:
+                    self._dyn.mark(pos[0], pos[1], now)
             if self._blocked_since is None:
                 self._blocked_since = now
             else:
@@ -302,8 +359,9 @@ class NavServerNode(Node):
 
     def _plan(self) -> bool:
         assert self._pose is not None and self._goal is not None
+        grid = self._dyn.overlay(self._inflated, self._now())
         path = plan_path(
-            self._inflated, self._grid.origin, self._grid.res,
+            grid, self._grid.origin, self._grid.res,
             (self._pose[0], self._pose[1]), (self._goal["x"], self._goal["y"]),
         )
         if path is None:

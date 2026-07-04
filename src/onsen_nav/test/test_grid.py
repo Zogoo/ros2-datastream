@@ -81,3 +81,61 @@ class TestDerived:
 
     def test_is_lethal_out_of_bounds_is_false(self, grid):
         assert grid.is_lethal(1e6, 1e6) is False
+
+
+class TestDynamicLayer:
+    def _grid(self):
+        import json
+
+        from onsen_nav.grid import NavGrid
+        with open(LAYOUT) as f:
+            return NavGrid(json.load(f))
+
+    def test_mark_blocks_and_expires(self):
+        from onsen_nav.grid import FREE, DynamicLayer
+        grid = self._grid()
+        inflated = grid.inflated(0.36)
+        # a free spot mid-corridor
+        x, y = 0.0, 1.0
+        r, c = grid.world_to_cell(x, y)
+        assert inflated[r, c] == FREE
+        dyn = DynamicLayer(grid, 0.41, ttl_s=30.0)
+        dyn.mark(x, y, now=0.0)
+        assert dyn.overlay(inflated, now=1.0)[r, c] != FREE, "marked cell must block"
+        # inflation: a cell 0.3 m away is inside the 0.41 m disc
+        r2, c2 = grid.world_to_cell(x + 0.3, y)
+        assert dyn.overlay(inflated, now=1.0)[r2, c2] != FREE
+        # after the TTL the memory decays back to the static map
+        assert dyn.overlay(inflated, now=31.0)[r, c] == FREE
+        assert dyn.active_count(31.0) == 0
+
+    def test_overlay_never_mutates_static_grid(self):
+        from onsen_nav.grid import FREE, DynamicLayer
+        grid = self._grid()
+        inflated = grid.inflated(0.36)
+        r, c = grid.world_to_cell(0.0, 1.0)
+        dyn = DynamicLayer(grid, 0.41)
+        dyn.mark(0.0, 1.0, now=0.0)
+        dyn.overlay(inflated, now=1.0)
+        assert inflated[r, c] == FREE, "static inflated grid must stay untouched"
+
+    def test_replan_routes_around_dynamic_obstacle(self):
+        """The wiggle-loop regression: a blocked tracker used to replan the
+        IDENTICAL path through an unmapped stool. With the mark in place the
+        planner must find a path that avoids the marked disc (or fail —
+        never the same straight line through it)."""
+        import math
+
+        from onsen_nav.astar import plan_path
+        from onsen_nav.grid import DynamicLayer
+        grid = self._grid()
+        inflated = grid.inflated(0.36)
+        start, goal = (0.0, 0.2), (0.0, 2.2)
+        direct = plan_path(inflated, grid.origin, grid.res, start, goal)
+        assert direct is not None
+        dyn = DynamicLayer(grid, 0.41)
+        dyn.mark(0.0, 1.2, now=0.0)   # "stool" mid-corridor on the direct line
+        rerouted = plan_path(dyn.overlay(inflated, now=1.0), grid.origin, grid.res, start, goal)
+        if rerouted is not None:
+            clearance = min(math.hypot(px - 0.0, py - 1.2) for px, py in rerouted)
+            assert clearance > 0.36, "replanned path must clear the marked obstacle"

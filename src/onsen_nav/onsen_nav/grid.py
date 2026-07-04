@@ -120,3 +120,52 @@ class NavGrid:
     def occupancy_msg_data(self) -> list[int]:
         """nav_msgs/OccupancyGrid.data payload (row-major from origin) for /map."""
         return [100 if v == LETHAL else 0 for v in self.planner_grid.reshape(-1)]
+
+
+class DynamicLayer:
+    """Decaying memory of obstacles the static map doesn't know (a stool, a
+    bucket, a bumped chair) — the minimal form of Nav2's costmap obstacle
+    layer. Without it, recovery after a block replans THROUGH the same
+    unmapped obstacle forever: drive, block, back up, replan the identical
+    path — the 'wiggling in place' failure. Cells are marked from tracker
+    blocks and bumper hits, inflate like static walls, and expire after
+    ttl_s (movable clutter moves; a stale mark must not wall off a room)."""
+
+    def __init__(self, grid: NavGrid, radius_m: float, ttl_s: float = 30.0) -> None:
+        self._grid = grid
+        self._ttl = ttl_s
+        r = max(1, round(radius_m / grid.res))
+        self._disc = [
+            (dr, dc)
+            for dr in range(-r, r + 1)
+            for dc in range(-r, r + 1)
+            if dr * dr + dc * dc <= r * r
+        ]
+        self._cells: dict[tuple[int, int], float] = {}
+
+    def mark(self, x: float, y: float, now: float) -> None:
+        cell = self._grid.world_to_cell(x, y)
+        if self._grid.in_bounds(*cell):
+            self._cells[cell] = now + self._ttl
+
+    def active_count(self, now: float) -> int:
+        self._prune(now)
+        return len(self._cells)
+
+    def overlay(self, inflated: np.ndarray, now: float) -> np.ndarray:
+        """Returns the inflated grid with the live dynamic marks stamped in
+        (a copy — the static grid is never mutated)."""
+        self._prune(now)
+        if not self._cells:
+            return inflated
+        out = inflated.copy()
+        h, w = out.shape
+        for (r, c) in self._cells:
+            for dr, dc in self._disc:
+                rr, cc = r + dr, c + dc
+                if 0 <= rr < h and 0 <= cc < w:
+                    out[rr, cc] = LETHAL
+        return out
+
+    def _prune(self, now: float) -> None:
+        self._cells = {cell: exp for cell, exp in self._cells.items() if exp > now}

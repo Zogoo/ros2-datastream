@@ -26,8 +26,27 @@ export class ContactSensor {
 
       const force = event.totalForceMagnitude();
       const impulse = force / 60;
+      // 360° bumper ring (Roomba-style): resolve which skirt sector was hit
+      // from the contact force direction. The world pushes the robot AWAY
+      // from the obstacle, so the obstacle bears opposite the force the
+      // robot receives. Rapier reports the force on collider1 — flip when
+      // the robot is collider2.
+      let bearingDeg = null;
+      const f = event.totalForce();
+      const mag = Math.hypot(f.x, f.y);
+      if (mag > 1e-6) {
+        const sign = robotMeta === meta1 ? 1 : -1;
+        const obsX = -sign * f.x / mag;
+        const obsY = -sign * f.y / mag;
+        const yaw = this.robot.pose().yaw;
+        bearingDeg = (Math.atan2(obsY, obsX) - yaw) * (180 / Math.PI);
+        bearingDeg = ((bearingDeg + 540) % 360) - 180;  // wrap to (-180, 180]
+      }
+      const part = this._partFor(robotMeta, otherMeta, bearingDeg);
+      if (part.startsWith('bumper_')) this.robot.flashBumper?.(part.slice(7));
       this._publishContact({
-        part: this._partFor(robotMeta, otherMeta),
+        part,
+        bearing_deg: bearingDeg === null ? null : Math.round(bearingDeg),
         impulse: Math.round(impulse * 1000) / 1000,
         force: Math.round(force * 100) / 100,
         object_kind: otherMeta.kind,
@@ -51,14 +70,15 @@ export class ContactSensor {
     }
   }
 
-  _partFor(robotMeta, otherMeta) {
-    if (robotMeta.part !== 'chassis') return robotMeta.part;
-    if (!otherMeta?.id) return 'chassis';
-    return `chassis_${this._sideOf(otherMeta)}`;
-  }
-
-  _sideOf(_otherMeta) {
-    return 'body';
+  _partFor(robotMeta, otherMeta, bearingDeg = null) {
+    // The bumper ring is the outermost shell, so it takes hits first; chassis
+    // contacts (something striking above the ring band) resolve to the same
+    // sector naming so consumers see one 360° bumper.
+    if (robotMeta.part === 'bumper' || robotMeta.part === 'chassis') {
+      if (!otherMeta?.id) return 'chassis';
+      return `bumper_${bumperSector(bearingDeg)}`;
+    }
+    return robotMeta.part;
   }
 
   _publishContact(payload) {
@@ -80,3 +100,16 @@ export class ContactSensor {
 }
 
 const round3 = (v) => Math.round(v * 1000) / 1000;
+
+/** Roomba-style bumper ring: map a body-frame obstacle bearing (deg, 0 =
+ *  straight ahead, +left) onto one of 8 skirt sectors. Null bearing (force
+ *  too small to resolve) reports as front — the conservative escape. */
+export function bumperSector(bearingDeg) {
+  if (bearingDeg === null || !Number.isFinite(bearingDeg)) return 'front';
+  const sectors = [
+    'front', 'front_left', 'left', 'rear_left',
+    'rear', 'rear_right', 'right', 'front_right',
+  ];
+  const idx = Math.round(((bearingDeg + 360) % 360) / 45) % 8;
+  return sectors[idx];
+}

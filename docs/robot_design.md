@@ -53,7 +53,7 @@ band under the 0.62 m scan plane.
 | Rear RGB | z 0.38, pitch −10° | same | reversing coverage |
 | Depth | z 0.36, pitch −20° | D435-class | 87° HFOV, 0.28–3 m, 320×240, σ ∝ z² |
 | Sonar ×3 | nose, z 0.10, ±25/0° | HC-SR04-class | 15° cones, 0.02–4 m, steam-immune |
-| Contact skirt | z 0.08, 4 sides | bumper strips | named `part` in `/robot/contacts` |
+| Bumper ring 360° | z 0.085, 8 segments | Roomba-class spring bumper | outermost shell, 12 mm proud; hit sector + `bearing_deg` in `/robot/contacts` (`bumper_front` … `bumper_rear_right`); struck segment flashes in the sim |
 | IMU | CoG | MEMS | 50 Hz, bias random-walk |
 
 ## Visibility and occlusion analysis (the core decision)

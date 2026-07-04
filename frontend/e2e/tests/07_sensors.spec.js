@@ -15,8 +15,10 @@ test('sensors: lidar/cameras/depth/sonar/imu publish at healthy rates', async ({
 
   await bootSim(page);
   await setManual(page); // keep the mission executor's hands off the base
-  // park in the corridor facing the west cold bath: rim 1.3 m ahead, below the scan plane
-  await page.evaluate(() => window.__sim.setPose(-0.9, -3.8, Math.PI));
+  // park in the corridor facing the west cold bath: rim ahead, below the scan
+  // plane. Pose places the LIDAR (front-right corner mast since the top-deck
+  // bin redesign) on the same sightline the original rear-center mast had.
+  await page.evaluate(() => window.__sim.setPose(-0.44, -3.95, Math.PI));
 
   await sleep(10_000);
 
