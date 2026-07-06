@@ -13,7 +13,7 @@ autonomy.
 ```
 ┌────────────────────── browser (Vite + Three.js + Rapier) ──────────────────────┐
 │ physics world: onsen layout, movable weighted objects, water buoyancy, steam   │
-│ robot: 6-wheel raycast suspension chassis, racked decks, 6-axis arm + gripper  │
+│ robot: differential base (2 centre driven + 4 casters), decks, 6-axis arm/grip │
 │ sensors: lidar (raycast), front/rear RGB (render), depth (depth buffer),       │
 │          sonar (cone cast), imu (body state), odom (encoder integration),      │
 │          contacts (collision events), ground truth                            │
@@ -81,8 +81,8 @@ those frameworks implement, behind seam-compatible interfaces — see
    `/base/command` protocol lines into per-wheel velocities on
    `/base/wheel_targets` — and obeys `/safety/stop` unconditionally
 4. The FE drivetrain consumes wheel targets; physics produces motion; encoders
-   integrate `/odom` *from wheel rotation, not ground truth*, so skid-steer
-   drift is real
+   integrate `/odom` *from the driven-wheel rotation, not ground truth*, so
+   differential-drive slip/drift is real
 
 The arm is identical in shape: `/arm/command` (serial protocol) ->
 `arm_controller` -> 20 Hz interpolated `/arm/joint_targets` -> FE servo lag ->

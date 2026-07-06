@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Onsen Robot Simulator</title>
-  <script type="module" crossorigin src="/assets/index-DBU8Y2NM.js"></script>
+  <script type="module" crossorigin src="/assets/index-Be-2yeub.js"></script>
   <link rel="stylesheet" crossorigin href="/assets/index-NkPVeWz8.css">
 </head>
 <body>
@@ -70,6 +70,7 @@
     <button class="mode-btn active" data-drive-mode="auto">AUTO</button>
     <button class="mode-btn" data-drive-mode="manual">MANUAL</button>
   </div>
+  <button id="estop-arm-btn" class="mode-btn" title="Arm/disarm the safety e-stop latch">E-STOP: OFF</button>
   <div id="view-modes">
     <button class="mode-btn active" data-view="orbit">ORBIT</button>
     <button class="mode-btn" data-view="follow">FOLLOW</button>
@@ -124,7 +125,15 @@
       <option value="stool">stool</option>
       <option value="bottle">bottle</option>
     </select>
+    <select id="skin-instance">
+      <option value="">all instances</option>
+    </select>
     <input type="file" id="skin-input" accept="image/*" />
+  </div>
+  <div class="skin-row" id="skin-presets">
+    <button class="mode-btn skin-preset" data-preset="ryokan">RYOKAN</button>
+    <button class="mode-btn skin-preset" data-preset="striped">STRIPED</button>
+    <button class="mode-btn skin-preset" data-preset="charcoal">CHARCOAL</button>
   </div>
   <div class="skin-row">
     <button class="mode-btn" id="skin-reset-btn">RESET SKIN</button>

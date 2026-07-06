@@ -59,10 +59,10 @@ class TestCoupling:
 
 class TestRemap:
     def test_arm_coupled_wheels_passthrough(self):
-        names = [*ARM_JOINTS, "wheel_front_left", "wheel_front_right"]
+        names = [*ARM_JOINTS, "wheel_left", "wheel_right"]
         positions = [0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 1.23, 4.56]
         out_names, out_pos = remap_joint_state(names, positions, RATIO)
-        assert "wheel_front_left" in out_names
+        assert "wheel_left" in out_names
         assert 1.23 in out_pos and 4.56 in out_pos
         # shoulder_lift coupled
         assert out_pos[out_names.index("shoulder_lift_joint")] == pytest.approx(RATIO * 0.1)

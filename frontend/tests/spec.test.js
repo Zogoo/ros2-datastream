@@ -5,18 +5,23 @@ import profiles from '../../shared/object_profiles.json';
 
 describe('robot_spec.json invariants', () => {
   it('suspension geometry is self-consistent', () => {
-    const s = spec.wheels.suspension;
+    const { suspension: s, driven, casters } = spec.wheels;
     expect(s.travel).toBeLessThanOrEqual(s.rest_length);
-    // body z at rest = attach_z subtracted from (rest_length + wheel radius)
-    expect(s.rest_length + spec.wheels.radius - s.attach_z).toBeCloseTo(0.13, 3);
+    // Body z at rest = rest_length + wheel radius - attach_z. The driven (Ø200)
+    // and caster (Ø100) groups use different attach_z so the body still sits
+    // level at the same BASE_Z on mixed-diameter wheels.
+    expect(s.rest_length + driven.radius - driven.attach_z).toBeCloseTo(0.16, 3);
+    expect(s.rest_length + casters.radius - casters.attach_z).toBeCloseTo(0.16, 3);
   });
 
   it('static spring deflection sits inside the travel band', () => {
-    const k = spec.wheels.suspension.stiffness;
-    const weightPerWheel = (spec.chassis.mass * 9.81) / 6;
-    const deflection = weightPerWheel / k;
-    expect(deflection).toBeGreaterThan(0.2 * spec.wheels.suspension.travel);
-    expect(deflection).toBeLessThan(0.8 * spec.wheels.suspension.travel);
+    const { suspension: s } = spec.wheels;
+    // Centre-drive: the two driven wheels sit on the CoG axle and carry
+    // essentially the whole weight; the corner casters only resist pitch/roll.
+    const drivenLoad = (spec.chassis.mass * 9.81) / 2;
+    const deflection = drivenLoad / s.stiffness;
+    expect(deflection).toBeGreaterThan(0.2 * s.travel);
+    expect(deflection).toBeLessThan(0.8 * s.travel);
   });
 
   it('lidar sits above the stow guard and below doors', () => {
@@ -26,10 +31,11 @@ describe('robot_spec.json invariants', () => {
   });
 
   it('robot footprint fits through every doorway with margin', () => {
-    const widthWithBasket = spec.basket.center[1] + spec.basket.size[1] / 2
-      + spec.chassis.size[1] / 2;
+    // Bin sits fully inside the footprint now, so width is the chassis plus the
+    // bumper ring standoff.
+    const halfWidth = spec.chassis.size[1] / 2 + 0.012;
     for (const door of layout.doors) {
-      expect(door.width).toBeGreaterThan(widthWithBasket + 0.2);
+      expect(door.width).toBeGreaterThan(2 * halfWidth + 0.1);
     }
   });
 

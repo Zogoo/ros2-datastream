@@ -20,7 +20,7 @@ Names live in exactly two mirrored registries:
 | `/sonar/range_0..2` | `sensor_msgs/Range` | 15 Hz | bearings −25/0/+25°, cone min-hit, steam-immune |
 | `/imu` | `sensor_msgs/Imu` | 50 Hz | at CoG; suspension oscillation visible; bias random-walk |
 | `/odom` + `/tf` | `nav_msgs/Odometry` | 20 Hz | encoder-integrated — drifts under slip (by design) |
-| `/joint_states` | `sensor_msgs/JointState` | 20 Hz | measured (lagging) arm joints + 6 wheels |
+| `/joint_states` | `sensor_msgs/JointState` | 20 Hz | measured (lagging) arm joints + 2 driven wheels |
 | `/robot/contacts` | `std_msgs/String` JSON | event | `{part, impulse, normal, object_id, object_class, critical}` |
 | `/ground_truth/pose` | `geometry_msgs/PoseStamped` | 10 Hz | for drift quantification |
 | `/ground_truth/objects` | `std_msgs/String` JSON | 5 Hz | true object states for labeling/eval |
@@ -44,7 +44,7 @@ Names live in exactly two mirrored registries:
 |---|---|---|
 | `/base/command` | in | protocol line: `Q`, `V vx wz`, `T vl vr`, `W id vel`, `SPEED pct`, `STOP`, `RESET_ERROR` |
 | `/base/response` | out | protocol replies (`OK …` / `ERR …`) |
-| `/base/wheel_targets` | out 20 Hz | `{"w": [rad/s ×6], "ts"}` — consumed by the FE drivetrain |
+| `/base/wheel_targets` | out 20 Hz | `{"w": [rad/s ×2] (left, right), "ts"}` — consumed by the FE drivetrain |
 | `/base/state` | out 10 Hz | `{status, vx, wz, wheels, …}` |
 
 ## Arm firmware (`arm_controller`)

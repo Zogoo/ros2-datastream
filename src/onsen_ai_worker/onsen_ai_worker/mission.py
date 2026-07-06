@@ -35,13 +35,16 @@ ReachClear = Callable[[tuple[float, float], tuple[float, float]], bool]
 # typically picked by approaching parallel to the wall (±90°).
 APPROACH_BEARINGS = (0.0, 0.5, -0.5, 1.05, -1.05, 1.57, -1.57, 2.1, -2.1, 2.6, -2.6, 3.14)
 
-SCOOP_FORWARD = 0.667     # m, fingertip ahead of base center at PICK_SCOOP
+SCOOP_FORWARD = 0.757     # m, fingertip ahead of base center at PICK_SCOOP
+# (arm base moved to x 0.35 so the pick crescent clears the enlarged 0.80 m
+# body's front bumper at x 0.412 — the standoff stands the robot far enough
+# back that the bumper does not reach the towel during approach).
 # Delivery geometry: towels are unloaded FROM the onboard bin BY THE ARM — the
-# DROP_BIN pose releases at (0.28, 0.66) in base_link, z 0.66, the only
+# DROP_BIN pose releases at (0.37, 0.66) in base_link, z 0.66, the only
 # mechanism on this robot that clears the 0.55 m floor-bin rim (a servo tilt
 # of the deck bin cannot: its hinge is capped at the 0.58 lidar guard band, so
 # contents would exit below the rim). ALIGN_BIN points this offset at the bin.
-DELIVER_OFFSET = (0.28, 0.66)  # m, DROP_BIN release point in base_link
+DELIVER_OFFSET = (0.37, 0.66)  # m, DROP_BIN release point in base_link
 PICK_TOL_X = 0.08
 PICK_TOL_Y = 0.08
 YAW_TOL = 0.08
@@ -61,7 +64,7 @@ STOW_VERIFY_KG = 0.15     # load-cell delta proving the stowed towel landed IN t
 MAX_UNLOAD_CYCLES = 5     # arm unload attempts per delivery trip
 MAX_STOW_RETRIES = 2      # arm-contact aborts during STOW before force-release
 
-# Canned fallback (no IK): fixed scoop + grip pose, fixed 0.667 m ahead.
+# Canned fallback (no IK): fixed scoop + grip pose, fixed 0.757 m ahead.
 PICK_SEQUENCE = [
     "A PRE_PICK", "A PICK_LOWER", "A PICK_SCOOP",
     "A PICK_GRIP", "A PICK_LIFT", "A PICK_RETRACT",
@@ -136,7 +139,7 @@ class MissionLogic:
         self.bin_center = bin_center
         # ik_reach(rel_x, rel_y) -> firmware "J ..." line reaching that base_link
         # point at GRASP_Z, or None if unreachable. When unset, the canned
-        # PICK_SCOOP pose is used (fixed 0.667 m ahead).
+        # PICK_SCOOP pose is used (fixed 0.757 m ahead).
         self._ik_reach = ik_reach
         # reach_clear(standoff_xy, towel_xy) -> arm sweep clear of walls from
         # that standoff. When unset, the anchor-direction standoff is used

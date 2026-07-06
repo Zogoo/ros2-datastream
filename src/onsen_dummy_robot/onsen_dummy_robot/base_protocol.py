@@ -1,12 +1,13 @@
-"""6-wheel skid-steer base firmware emulation — pure logic, no ROS imports.
+"""Differential base firmware emulation — pure logic, no ROS imports.
 
-Wheel indexing: 0..2 left (front,mid,rear), 3..5 right (front,mid,rear).
+Two driven wheels on the centreline-rear (plus two undriven front casters that
+the firmware never actuates). Wheel indexing: 0 = left, 1 = right.
 
 Protocol (one command per line):
-  Q                  -> "STATE vx wz w0..w5 IDLE|MOVING|STOPPED|SAFETY"
+  Q                  -> "STATE vx wz w0 w1 IDLE|MOVING|STOPPED|SAFETY"
   V vx wz            twist command (m/s, rad/s)
   T left right       per-side surface speed (m/s)
-  W i radps          single wheel angular velocity
+  W i radps          single wheel angular velocity (i in {0,1})
   SPEED pct          global scale 1..100
   STOP               halt + latch error
   RESET_ERROR        clear STOP latch (safety latch clears only via safety input)
@@ -21,9 +22,9 @@ from __future__ import annotations
 
 import time
 
-WHEEL_RADIUS = 0.07     # m
-TRACK_WIDTH = 0.47      # m
-MAX_WHEEL_RADPS = 12.0  # ~0.84 m/s surface speed
+WHEEL_RADIUS = 0.10     # m — Ø200 driven wheels (mirrors spec wheels.driven.radius)
+TRACK_WIDTH = 0.50      # m — driven-wheel track (spec wheels.driven.track_width)
+MAX_WHEEL_RADPS = 12.0  # ~1.2 m/s surface speed
 CMD_TIMEOUT_S = 1.0     # zero output if no twist refresh
 
 # Collect-bin dump servo + load cell (mirrors shared/robot_spec.json basket).
@@ -37,7 +38,7 @@ BIN_LOAD_DEBOUNCE_S = 1.0
 
 class BaseFirmware:
     def __init__(self) -> None:
-        self._wheels = [0.0] * 6
+        self._wheels = [0.0, 0.0]
         self._mode = "twist"
         self._vx = 0.0
         self._wz = 0.0
@@ -106,7 +107,7 @@ class BaseFirmware:
                 return [f"OK T {parts[1]} {parts[2]}"]
             if op == "W":
                 i, radps = int(parts[1]), float(parts[2])
-                if not 0 <= i < 6:
+                if not 0 <= i < 2:
                     return [f"ERR BAD_WHEEL {i}"]
                 if abs(radps) > MAX_WHEEL_RADPS:
                     return [f"ERR LIMIT wheel={i} value={radps:g}"]
@@ -144,10 +145,10 @@ class BaseFirmware:
 
     def scaled_wheels(self, now: float | None = None) -> list[float]:
         if self._safety or self._stopped:
-            return [0.0] * 6
+            return [0.0, 0.0]
         now = time.monotonic() if now is None else now
         if self._mode == "twist" and now - self._last_cmd_t > CMD_TIMEOUT_S:
-            return [0.0] * 6
+            return [0.0, 0.0]
         scale = self._speed_pct / 100.0
         return [w * scale for w in self._wheels]
 
@@ -208,11 +209,11 @@ class BaseFirmware:
             self._mode = "twist"
         wl = _clamp(left / WHEEL_RADIUS, MAX_WHEEL_RADPS)
         wr = _clamp(right / WHEEL_RADIUS, MAX_WHEEL_RADPS)
-        self._wheels = [wl, wl, wl, wr, wr, wr]
+        self._wheels = [wl, wr]
         self._last_cmd_t = time.monotonic()
 
     def _zero(self) -> None:
-        self._wheels = [0.0] * 6
+        self._wheels = [0.0, 0.0]
         self._vx = self._wz = 0.0
 
 

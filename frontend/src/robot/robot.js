@@ -3,7 +3,7 @@ import { WheelSuspension, rotateQuat } from '../physics/vehicle.js';
 import { GROUP_OBJECT, GROUP_ROBOT, GROUP_WORLD, groups } from '../physics/world.js';
 import { Arm } from './arm.js';
 
-export const BASE_Z = 0.13; // body origin height above ground at suspension rest
+export const BASE_Z = 0.16; // body origin height above ground at suspension rest (Ø200 driven wheels)
 
 const LED_COLORS = {
   idle: 0x4da6ff, moving: 0x7ddc7d, picking: 0xffb74d, estop: 0xff3b30,
@@ -250,13 +250,15 @@ export class Robot {
     led.position.z = lz(0.105);
     g.add(led);
 
+    // Differential base: 2 large driven wheels (Ø200) + 2 small front casters
+    // (Ø100). Each wheel mesh is sized from its own radius; casters also swivel.
     this.wheelMeshes = [];
-    const wheelGeom = new THREE.CylinderGeometry(
-      this.spec.wheels.radius, this.spec.wheels.radius, this.spec.wheels.width, 20,
-    );
+    const { driven, casters } = this.spec.wheels;
     const wheelMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1f, roughness: 0.95 });
     for (const w of this.suspension.wheels) {
-      const mesh = new THREE.Mesh(wheelGeom, wheelMat);
+      const width = w.driven ? driven.width : casters.width;
+      const geom = new THREE.CylinderGeometry(w.radius, w.radius, width, 20);
+      const mesh = new THREE.Mesh(geom, wheelMat);
       mesh.castShadow = true;
       g.add(mesh);
       this.wheelMeshes.push({ mesh, wheel: w });
@@ -264,15 +266,15 @@ export class Robot {
 
     const standMat = accentMat;
     const standGeom = new THREE.CylinderGeometry(0.012, 0.012, this.spec.decks.deck1_z - 0.20, 8);
-    for (const sx of [0.24, -0.24]) {
-      for (const sy of [0.15, -0.15]) {
+    for (const sx of [0.32, -0.32]) {
+      for (const sy of [0.22, -0.22]) {
         const post = new THREE.Mesh(standGeom, standMat);
         post.rotation.x = Math.PI / 2;
         post.position.set(sx, sy, lz((0.20 + this.spec.decks.deck1_z) / 2));
         g.add(post);
       }
     }
-    const deck1 = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.36, 0.012), bodyMat);
+    const deck1 = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.5, 0.012), bodyMat);
     deck1.position.z = lz(this.spec.decks.deck1_z);
     g.add(deck1);
 
@@ -356,12 +358,12 @@ export class Robot {
       new THREE.MeshStandardMaterial({ color: 0xd0312d, roughness: 0.4 }),
     );
     estop.rotation.x = Math.PI / 2;
-    estop.position.set(-0.27, -0.14, lz(0.22));
+    estop.position.set(-0.34, -0.22, lz(0.22));
     g.add(estop);
   }
 
   update(dt, isWetAt) {
-    if (this.safetyStop) this.suspension.setTargets([0, 0, 0, 0, 0, 0]);
+    if (this.safetyStop) this.suspension.setTargets([0, 0]);
     this.suspension.update(dt, isWetAt);
     this.arm.update(dt);
     this._updateBin(dt);
@@ -375,9 +377,10 @@ export class Robot {
     this.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
 
     for (const { mesh, wheel } of this.wheelMeshes) {
-      // Cylinder axis is local Y = the axle; spin about it.
+      // Cylinder axis is local Y = the axle; spin about it. Casters also swivel
+      // about Z to point along travel.
       mesh.position.set(wheel.local.x, wheel.local.y, wheel.local.z - wheel.suspensionLen);
-      mesh.rotation.set(0, wheel.spinAngle, 0);
+      mesh.rotation.set(0, wheel.spinAngle, wheel.driven ? 0 : wheel.steerAngle, 'ZYX');
     }
 
     const wanted = this.safetyStop ? 'estop'

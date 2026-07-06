@@ -37,9 +37,10 @@ class TestFkMirror:
         )
 
     def test_pick_scoop_touches_floor_ahead(self, model):
-        # the firmware PICK_SCOOP pose — must match the documented 0.667 m / ~4 cm
+        # the firmware PICK_SCOOP pose — fingertip 0.757 m ahead of base center
+        # (arm base at x 0.35) / ~4 cm off the floor
         ft = model.fingertip([90, 157, 57, 77, 90, 80])
-        assert ft[0] == pytest.approx(0.667, abs=0.01)
+        assert ft[0] == pytest.approx(0.757, abs=0.01)
         assert ft[2] == pytest.approx(0.041, abs=0.01)
 
     def test_pan_rotates_into_y(self, model):
@@ -68,7 +69,7 @@ class TestIkRoundTrip:
         assert tested > 300, "sampling should produce many reachable targets"
 
     def test_tool_tilt_respected(self, model):
-        target = (0.68, 0.0, 0.05)  # radial 0.42, inside the annulus
+        target = (0.77, 0.0, 0.05)  # radial 0.42, inside the annulus (base x 0.35)
         sol = model.ik(target, tilt_band_deg=(95, 120))
         assert sol is not None
         t3 = model.fk(sol)["tilts"][2]
@@ -92,7 +93,7 @@ class TestReachability:
         assert model.ik((x_in, 0.0, 0.03)) is not None
 
     def test_smoothness_prefers_near_current(self, model):
-        target = (0.66, 0.1, 0.05)  # radial ~0.41, inside the annulus
+        target = (0.75, 0.1, 0.05)  # radial ~0.41, inside the annulus (base x 0.35)
         far = model.ik(target, current=[90, 90, 90, 90, 90, 80])
         assert far is not None
         # gripper servo carried from current

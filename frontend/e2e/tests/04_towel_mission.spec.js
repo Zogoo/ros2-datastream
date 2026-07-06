@@ -20,8 +20,8 @@ test('towel mission: autonomy approaches, picks and delivers to the towel bin', 
   // stage: robot in the corridor facing north, towel 1 m ahead, bin close by
   // (keeps the deliver leg short so grasp retries don't eat the timeout)
   await page.evaluate(() => {
-    window.__sim.setPose(0, 1.9, Math.PI / 2);
-    window.__sim.spawn('towel', 0.05, 2.9, 0.1);
+    window.__sim.setPose(0, 3.04, Math.PI / 2);
+    window.__sim.spawn('towel', 0.08, 4.64, 0.1);
   });
   await setAuto(page);
 

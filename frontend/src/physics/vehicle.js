@@ -2,16 +2,22 @@ import { GROUP_WORLD, groups } from './world.js';
 
 const QUERY_SUSPENSION = groups(0xffff, GROUP_WORLD);
 
-/** Custom raycast suspension for the 6-wheel skid-steer base.
+/** Custom raycast suspension for the differential base: 2 driven wheels on the
+ *  centreline-rear + 2 free-swivelling casters at the front corners.
  *
  * Per wheel and per physics tick:
  *   - cast a ray down from the chassis attach point
  *   - spring force  F = k * compression - c * compressionVelocity
- *   - longitudinal traction toward the commanded wheel surface speed
- *   - lateral friction resisting side slip (reduced so skid-steer can rotate)
+ *   - DRIVEN wheels: longitudinal traction toward the commanded surface speed +
+ *     lateral friction resisting side slip (the two contact patches that steer
+ *     and propel the robot).
+ *   - CASTERS: no drive — they roll freely (zero longitudinal force) and offer
+ *     only a token lateral bite so they swivel to follow the body; they exist
+ *     for support, not propulsion.
  *
- * Wheel targets arrive as rad/s from /base/wheel_targets and pass through a
- * first-order servo lag, so encoders show realistic tracking error.
+ * Driven-wheel targets arrive as rad/s from /base/wheel_targets (2 values:
+ *   left, right) and pass through a first-order servo lag, so the encoders show
+ *   realistic tracking error. Casters are unmeasured.
  */
 export class WheelSuspension {
   constructor(physics, chassisBody, spec) {
@@ -20,36 +26,54 @@ export class WheelSuspension {
     this.spec = spec.wheels;
     this.chassisMass = spec.chassis.mass;
 
+    const { suspension, driven, casters } = this.spec;
     this.wheels = [];
-    const { axle_x: axles, track_width: track, suspension } = this.spec;
-    for (const x of axles) {
-      for (const side of [1, -1]) {
-        this.wheels.push({
-          local: { x, y: (side * track) / 2, z: suspension.attach_z },
-          side,
-          targetRadps: 0,
-          actualRadps: 0,
-          spinAngle: 0,
-          encoderAngle: 0,
-          suspensionLen: suspension.rest_length,
-          inContact: false,
-          normalForce: 0,
-          wetZone: false,
-        });
-      }
+
+    // Driven pair: index 0 = left (+Y), 1 = right (−Y) — matches base_controller
+    // which emits [w_left, w_right].
+    for (const side of [1, -1]) {
+      this.wheels.push({
+        driven: true,
+        radius: driven.radius,
+        local: { x: driven.axle_x, y: (side * driven.track_width) / 2, z: driven.attach_z },
+        side,
+        targetRadps: 0,
+        actualRadps: 0,
+        spinAngle: 0,
+        encoderAngle: 0,
+        steerAngle: 0,
+        suspensionLen: suspension.rest_length,
+        inContact: false,
+        normalForce: 0,
+        wetZone: false,
+      });
     }
+
+    // Casters: front corners, undriven, free-swivelling.
+    for (const [cx, cy] of casters.positions) {
+      this.wheels.push({
+        driven: false,
+        radius: casters.radius,
+        local: { x: cx, y: cy, z: casters.attach_z },
+        side: Math.sign(cy) || 1,
+        targetRadps: 0,
+        actualRadps: 0,
+        spinAngle: 0,
+        encoderAngle: 0,
+        steerAngle: 0,
+        suspensionLen: suspension.rest_length,
+        inContact: false,
+        normalForce: 0,
+        wetZone: false,
+      });
+    }
+
+    this.driven = this.wheels.filter((w) => w.driven);
   }
 
-  /** wheel order: 0..2 left (front,mid,rear), 3..5 right — matches base_controller. */
+  /** Driven-wheel targets: [left, right] surface rad/s. */
   setTargets(radpsArray) {
-    const left = [this.wheelAt(0, 1), this.wheelAt(1, 1), this.wheelAt(2, 1)];
-    const right = [this.wheelAt(0, -1), this.wheelAt(1, -1), this.wheelAt(2, -1)];
-    left.forEach((w, i) => { w.targetRadps = radpsArray[i] ?? 0; });
-    right.forEach((w, i) => { w.targetRadps = radpsArray[3 + i] ?? 0; });
-  }
-
-  wheelAt(axleIdx, side) {
-    return this.wheels[axleIdx * 2 + (side === 1 ? 0 : 1)];
+    this.driven.forEach((w, i) => { w.targetRadps = radpsArray[i] ?? 0; });
   }
 
   update(dt, isWetAt) {
@@ -58,21 +82,25 @@ export class WheelSuspension {
     const pos = body.translation();
     const linvel = body.linvel();
     const angvel = body.angvel();
-    const { radius, suspension, friction, drive_gain: driveGain, servo_lag_tau_s: tau } = this.spec;
+    const { suspension, friction, drive_gain: driveGain, servo_lag_tau_s: tau } = this.spec;
 
     const up = rotateQuat(rot, { x: 0, y: 0, z: 1 });
     const fwd = rotateQuat(rot, { x: 1, y: 0, z: 0 });
     const left = rotateQuat(rot, { x: 0, y: 1, z: 0 });
     const down = { x: -up.x, y: -up.y, z: -up.z };
     const alpha = 1 - Math.exp(-dt / tau);
+    const drivenShare = this.chassisMass / Math.max(1, this.driven.length);
+    const lateralShare = this.chassisMass / this.wheels.length;
 
     for (const w of this.wheels) {
-      w.actualRadps += (w.targetRadps - w.actualRadps) * alpha;
+      if (w.driven) {
+        w.actualRadps += (w.targetRadps - w.actualRadps) * alpha;
+      }
       w.spinAngle += w.actualRadps * dt;
       w.encoderAngle += w.actualRadps * dt;
 
       const attach = addVec(pos, rotateQuat(rot, w.local));
-      const maxToi = suspension.rest_length + suspension.travel + radius;
+      const maxToi = suspension.rest_length + suspension.travel + w.radius;
       const hit = this.physics.castRay(attach, down, maxToi, QUERY_SUSPENSION, body);
 
       if (!hit) {
@@ -81,7 +109,7 @@ export class WheelSuspension {
         w.suspensionLen = suspension.rest_length + suspension.travel;
         continue;
       }
-      const suspLen = Math.max(0, hit.toi - radius);
+      const suspLen = Math.max(0, hit.toi - w.radius);
       w.suspensionLen = suspLen;
       w.inContact = true;
 
@@ -102,26 +130,37 @@ export class WheelSuspension {
       const vContact = velocityAt(linvel, angvel, contact, pos);
       const vLong = dot(vContact, fwd);
       const vLat = dot(vContact, left);
-
-      const targetSurface = w.actualRadps * radius;
       const maxTraction = mu * springF;
-      let fLong = driveGain * (targetSurface - vLong) * (this.chassisMass / 6);
-      fLong = clamp(fLong, -maxTraction, maxTraction);
 
-      let fLat = -driveGain * vLat * (this.chassisMass / 6);
-      const maxLat = maxTraction * friction.lateral_factor;
-      fLat = clamp(fLat, -maxLat, maxLat);
-
-      const tractionImpulse = addVec(scaleVec(fwd, fLong * dt), scaleVec(left, fLat * dt));
-      body.applyImpulseAtPoint(tractionImpulse, contact, true);
+      if (w.driven) {
+        const targetSurface = w.actualRadps * w.radius;
+        let fLong = driveGain * (targetSurface - vLong) * drivenShare;
+        fLong = clamp(fLong, -maxTraction, maxTraction);
+        let fLat = -driveGain * vLat * lateralShare;
+        const maxLat = maxTraction * friction.lateral_factor;
+        fLat = clamp(fLat, -maxLat, maxLat);
+        const tractionImpulse = addVec(scaleVec(fwd, fLong * dt), scaleVec(left, fLat * dt));
+        body.applyImpulseAtPoint(tractionImpulse, contact, true);
+      } else {
+        // Free-rolling caster: no drive force; the wheel spins at the rolling
+        // speed and swivels to point along travel (visual), while a token
+        // lateral bite keeps it from sliding sideways without locking turns.
+        w.actualRadps = vLong / w.radius;
+        w.steerAngle = Math.abs(vLong) + Math.abs(vLat) > 0.02
+          ? Math.atan2(vLat, vLong)
+          : w.steerAngle;
+        let fLat = -driveGain * vLat * lateralShare;
+        const maxLat = maxTraction * 0.1;
+        fLat = clamp(fLat, -maxLat, maxLat);
+        body.applyImpulseAtPoint(scaleVec(left, fLat * dt), contact, true);
+      }
     }
   }
 
-  /** Per-side mean surface speed (m/s) read from the lagged servo state. */
+  /** Per-side surface speed (m/s) read from the lagged driven-wheel servo state. */
   sideSurfaceSpeeds() {
-    const { radius } = this.spec;
-    const mean = (idxs) => idxs.reduce((s, i) => s + this.wheels[i].actualRadps, 0) / idxs.length;
-    return { left: mean([0, 2, 4]) * radius, right: mean([1, 3, 5]) * radius };
+    const [dl, dr] = this.driven;
+    return { left: dl.actualRadps * dl.radius, right: dr.actualRadps * dr.radius };
   }
 }
 

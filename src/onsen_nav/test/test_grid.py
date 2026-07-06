@@ -17,32 +17,32 @@ def cell(grid: NavGrid, x: float, y: float) -> tuple[int, int]:
 
 class TestPlannerGrid:
     def test_dimensions_cover_building(self, grid):
-        assert grid.planner_grid.shape == (200, 260)
+        assert grid.planner_grid.shape == (320, 416)
 
     def test_outer_wall_occupied(self, grid):
-        assert grid.planner_grid[cell(grid, 0.0, 4.96)] == LETHAL
+        assert grid.planner_grid[cell(grid, 0.0, 7.936)] == LETHAL
 
     def test_corridor_free(self, grid):
-        assert grid.planner_grid[cell(grid, 0.0, -3.6)] == FREE  # robot spawn
+        assert grid.planner_grid[cell(grid, 0.0, -5.76)] == FREE  # robot spawn
 
     def test_pool_is_keepout_with_margin(self, grid):
-        assert grid.planner_grid[cell(grid, -3.5, -3.8)] == LETHAL  # pool center
-        assert grid.planner_grid[cell(grid, -3.5, -2.85)] == LETHAL  # within margin
+        assert grid.planner_grid[cell(grid, -5.6, -6.08)] == LETHAL  # pool center
+        assert grid.planner_grid[cell(grid, -5.6, -4.75)] == LETHAL  # within 0.30 m margin
 
     def test_lounger_occupied_for_planner(self, grid):
-        assert grid.planner_grid[cell(grid, -5.55, 0.6)] == LETHAL
+        assert grid.planner_grid[cell(grid, -8.88, 0.96)] == LETHAL
 
     def test_towel_bin_occupied(self, grid):
-        assert grid.planner_grid[cell(grid, 0.0, 4.45)] == LETHAL
+        assert grid.planner_grid[cell(grid, 0.0, 7.12)] == LETHAL
 
 
 class TestFieldGrid:
     def test_walls_visible_to_lidar(self, grid):
-        assert grid.field_grid[cell(grid, 0.0, 4.96)] == LETHAL
+        assert grid.field_grid[cell(grid, 0.0, 7.936)] == LETHAL
 
     def test_lounger_invisible_to_lidar(self, grid):
         # top z = 0.09 + 0.32 = 0.41 < scan plane 0.62
-        assert grid.field_grid[cell(grid, -5.55, 0.6)] == FREE
+        assert grid.field_grid[cell(grid, -8.88, 0.96)] == FREE
 
     def test_lockers_visible_to_lidar(self, grid):
         import json
@@ -52,21 +52,21 @@ class TestFieldGrid:
         assert grid.field_grid[cell(grid, *locker["c"])] == LETHAL
 
     def test_pool_not_in_field(self, grid):
-        assert grid.field_grid[cell(grid, -3.5, -3.8)] == FREE
+        assert grid.field_grid[cell(grid, -5.6, -6.08)] == FREE
 
 
 class TestDerived:
     def test_inflation_grows_walls(self, grid):
         inflated = grid.inflated(0.40)
         # a free cell 0.3 m from the north wall becomes lethal after inflation
-        probe = cell(grid, 0.0, 4.85)
+        probe = cell(grid, 0.0, 7.76)
         assert grid.planner_grid[probe] == FREE or grid.planner_grid[probe] == LETHAL
-        assert inflated[cell(grid, 0.0, 4.7)] == LETHAL
+        assert inflated[cell(grid, 0.0, 7.52)] == LETHAL
 
     def test_field_distance_zero_at_wall_positive_in_corridor(self, grid):
         dt = grid.field_distance()
-        assert dt[cell(grid, 0.0, 4.96)] == 0.0
-        assert dt[cell(grid, 0.0, -3.6)] > 0.4
+        assert dt[cell(grid, 0.0, 7.936)] == 0.0
+        assert dt[cell(grid, 0.0, -5.76)] > 0.4
 
     def test_determinism(self):
         a = NavGrid.from_file(LAYOUT)
@@ -75,9 +75,9 @@ class TestDerived:
         assert np.array_equal(a.field_grid, b.field_grid)
 
     def test_is_lethal_matches_planner_grid(self, grid):
-        assert grid.is_lethal(0.0, 4.96) is True    # outer wall
-        assert grid.is_lethal(0.0, -3.6) is False   # robot spawn, corridor
-        assert grid.is_lethal(-3.5, -3.8) is True   # pool keepout
+        assert grid.is_lethal(0.0, 7.936) is True    # outer wall
+        assert grid.is_lethal(0.0, -5.76) is False   # robot spawn, corridor
+        assert grid.is_lethal(-5.6, -6.08) is True   # pool keepout
 
     def test_is_lethal_out_of_bounds_is_false(self, grid):
         assert grid.is_lethal(1e6, 1e6) is False

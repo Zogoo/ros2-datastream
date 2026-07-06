@@ -13,7 +13,7 @@ test('water: towels float in the bath; the rim is geometrically unclimbable', as
   await armSafety(page); // water/tilt protection is part of this scenario
 
   // drop a towel into the west cold bath (water_z = 0.16)
-  const towelId = await page.evaluate(() => window.__sim.spawn('towel', -3.5, -3.8, 0.8));
+  const towelId = await page.evaluate(() => window.__sim.spawn('towel', -5.6, -6.08, 0.8));
   await sleep(4000);
   const towel = await page.evaluate((id) => window.__sim.objectState(id), towelId);
   expect(towel.z, 'towel must settle floating near the water line').toBeGreaterThan(0.08);
@@ -23,10 +23,10 @@ test('water: towels float in the bath; the rim is geometrically unclimbable', as
   // Aggressive attempts may rear the chassis up and trip the tilt e-stop —
   // that protective stop is acceptable; reaching the water is not.
   await setManual(page);
-  await page.evaluate(() => window.__sim.setPose(-3.5, -2.45, -Math.PI / 2));
+  await page.evaluate(() => window.__sim.setPose(-5.6, -3.92, -Math.PI / 2));
   await holdButton(page, '#dpad-fwd', 4000);
   const pose = await page.evaluate(() => window.__sim.pose());
-  expect(pose.y, 'rim must block the robot before the water').toBeGreaterThan(-3.07);
+  expect(pose.y, 'rim must block the robot before the water').toBeGreaterThan(-4.912);
   const drowned = probe.received('/robot/events')
     .some((m) => JSON.parse(m.data).event === 'SAFETY_CRITICAL_CONTACT');
   expect(drowned, 'robot must never reach the water').toBe(false);

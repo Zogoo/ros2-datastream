@@ -27,10 +27,11 @@ export class OdomSensor {
   }
 
   update(dt) {
+    const { driven } = this.spec.wheels;
     const { left, right } = this.robot.suspension.sideSurfaceSpeeds();
-    this.pose = integrateOdometry(this.pose, left, right, this.spec.wheels.track_width, dt);
-    this.wheelAngles[0] += (left / this.spec.wheels.radius) * dt;
-    this.wheelAngles[1] += (right / this.spec.wheels.radius) * dt;
+    this.pose = integrateOdometry(this.pose, left, right, driven.track_width, dt);
+    this.wheelAngles[0] += (left / driven.radius) * dt;
+    this.wheelAngles[1] += (right / driven.radius) * dt;
 
     this.accumulator += dt;
     if (this.accumulator < 1 / this.hz) return;

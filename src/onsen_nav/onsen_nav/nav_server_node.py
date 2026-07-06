@@ -51,11 +51,14 @@ LATCHED_QOS = QoSProfile(
 )
 
 LAYOUT_PATH = os.environ.get("ONSEN_LAYOUT_PATH", "/ros2_ws/shared/onsen_layout.json")
-# Planner footprint: circumscribed radius INCLUDING the bumper ring (~0.39 at
-# the ring corners) — inflation must cover rotate-in-place anywhere on a
-# planned path, or turning near a wall grinds the ring corner into it (bumper
-# feedback loop: hit -> escape restarted by the next hit -> stuck).
-ROBOT_RADIUS = 0.40
+# Planner footprint: the swept radius of a rotate-in-place. The driven wheels
+# are on the centre axle (x 0), so base_link IS the pivot and the swept radius
+# equals the circumscribed radius — the far bumper corner at
+# sqrt(0.412^2 + 0.312^2) ~ 0.52 m — plus a small margin. Inflation must cover
+# it or turning near a wall grinds the ring corner into it (bumper feedback
+# loop: hit -> escape restarted by the next hit -> stuck). The onsen layout is
+# scaled up (shared/onsen_layout.json) so this footprint still has clear paths.
+ROBOT_RADIUS = 0.55
 YAW_TOLERANCE = 0.10
 BLOCKED_FAIL_S = 8.0
 BLOCKED_RECOVER_S = 3.0      # blocked this long -> try one recovery before giving up

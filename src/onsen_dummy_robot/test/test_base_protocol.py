@@ -27,21 +27,21 @@ class TestTwist:
         fw.handle("V 0 1.0")
         wheels = fw.scaled_wheels()
         expected = (1.0 * TRACK_WIDTH / 2) / WHEEL_RADIUS
-        assert math.isclose(wheels[0], -expected, rel_tol=1e-6)
-        assert math.isclose(wheels[3], expected, rel_tol=1e-6)
+        assert math.isclose(wheels[0], -expected, rel_tol=1e-6)   # left
+        assert math.isclose(wheels[1], expected, rel_tol=1e-6)    # right
 
     def test_command_timeout_zeroes_output(self):
         fw = BaseFirmware()
         fw.handle("V 0.3 0")
         assert any(fw.scaled_wheels())
-        assert fw.scaled_wheels(now=fw._last_cmd_t + 2.0) == [0.0] * 6
+        assert fw.scaled_wheels(now=fw._last_cmd_t + 2.0) == [0.0, 0.0]
 
 
 class TestWheelMode:
     def test_single_wheel_command(self):
         fw = BaseFirmware()
-        assert fw.handle("W 2 5.0") == ["OK W 2 5"]
-        assert fw.scaled_wheels()[2] == 5.0
+        assert fw.handle("W 1 5.0") == ["OK W 1 5"]
+        assert fw.scaled_wheels()[1] == 5.0
 
     def test_wheel_limit(self):
         fw = BaseFirmware()
@@ -66,7 +66,7 @@ class TestLatches:
         fw = BaseFirmware()
         fw.handle("V 0.3 0")
         assert fw.set_safety(True) is True
-        assert fw.scaled_wheels() == [0.0] * 6
+        assert fw.scaled_wheels() == [0.0, 0.0]
         assert fw.handle("V 0.3 0") == ["ERR SAFETY_STOP"]
         assert fw.status == "SAFETY"
         # RESET_ERROR must NOT clear the safety latch
@@ -79,7 +79,7 @@ class TestLatches:
         fw = BaseFirmware()
         fw.set_safety(True)
         fw.set_twist(0.5, 0.0)
-        assert fw.scaled_wheels() == [0.0] * 6
+        assert fw.scaled_wheels() == [0.0, 0.0]
 
 
 class TestSpeedScale:
@@ -94,7 +94,7 @@ class TestSpeedScale:
         reply = fw.handle("Q")[0]
         parts = reply.split()
         assert parts[0] == "STATE"
-        assert len(parts) == 10
+        assert len(parts) == 6   # STATE vx wz w_left w_right IDLE
         assert parts[-1] == "IDLE"
 
 

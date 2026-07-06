@@ -47,9 +47,9 @@ SENSOR_QOS = QoSProfile(
     depth=5,
 )
 
-WHEEL_RADIUS = 0.07
-TRACK_WIDTH = 0.47
-ROBOT_RADIUS = 0.33
+WHEEL_RADIUS = 0.10
+TRACK_WIDTH = 0.50
+ROBOT_RADIUS = 0.42
 GRIP_CLOSE_DEG = 30.0
 PICK_WINDOW_X = (0.45, 0.85)
 PICK_WINDOW_Y = 0.18
@@ -77,7 +77,7 @@ class SyntheticSimNode(Node):
         self._x, self._y = self._layout.spawn_x, self._layout.spawn_y
         self._yaw = self._layout.spawn_yaw
         self._vl = self._vr = 0.0          # commanded side surface speeds (m/s)
-        self._wheel_angles = [0.0] * 6
+        self._wheel_angles = [0.0, 0.0]    # driven wheels: left, right
         self._arm_deg = [90.0, 90.0, 90.0, 90.0, 90.0, 70.0]
         self._was_closed = False
         self._held_id: str | None = None
@@ -128,8 +128,8 @@ class SyntheticSimNode(Node):
             w = json.loads(msg.data)["w"]
         except (json.JSONDecodeError, KeyError):
             return
-        self._vl = float(np.mean(w[0:3])) * WHEEL_RADIUS
-        self._vr = float(np.mean(w[3:6])) * WHEEL_RADIUS
+        self._vl = float(w[0]) * WHEEL_RADIUS
+        self._vr = float(w[1]) * WHEEL_RADIUS
 
     def _on_arm_targets(self, msg: String) -> None:
         try:
@@ -171,9 +171,8 @@ class SyntheticSimNode(Node):
         self._odo["yaw"] += wz * dt
         self._odo["x"] += v * math.cos(self._odo["yaw"]) * dt
         self._odo["y"] += v * math.sin(self._odo["yaw"]) * dt
-        for i in range(3):
-            self._wheel_angles[i] += (self._vl / WHEEL_RADIUS) * dt
-            self._wheel_angles[3 + i] += (self._vr / WHEEL_RADIUS) * dt
+        self._wheel_angles[0] += (self._vl / WHEEL_RADIUS) * dt
+        self._wheel_angles[1] += (self._vr / WHEEL_RADIUS) * dt
 
         if self._held_id:
             towel = self._towel(self._held_id)
@@ -314,12 +313,11 @@ class SyntheticSimNode(Node):
         js.name = [
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_pitch_joint", "wrist_roll_joint", "gripper_joint",
-            "wheel_front_left", "wheel_front_right", "wheel_mid_left",
-            "wheel_mid_right", "wheel_rear_left", "wheel_rear_right",
+            "wheel_left", "wheel_right",
         ]
         js.position = [math.radians(d - 90.0) for d in self._arm_deg] + list(self._wheel_angles)
-        js.velocity = [0.0] * 12
-        js.effort = [0.0] * 12
+        js.velocity = [0.0] * len(js.name)
+        js.effort = [0.0] * len(js.name)
         self._pub_joints.publish(js)
 
     def _publish_ground_truth(self) -> None:

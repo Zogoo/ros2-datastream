@@ -1,4 +1,11 @@
-# Robot design rationale
+# Robot design rationale — TidyBot-IX (Concept A)
+
+The simulated robot is the **Concept A** variant of TidyBot-IX (see
+`docs/robot_design_v2.md`): the low-cost, indoor-dry proof of concept — RPi 5 +
+accelerator compute, a single RPLIDAR A2, a custom 6-DOF Dynamixel arm
+(~0.35 kg payload), an OAK-D Lite plus two USB cameras, and hobby gearmotors on
+a differential base. It runs in the onsen test environment to prove the
+detect → approach → grasp pipeline.
 
 All dimensions live in `shared/robot_spec.json` (single source for the FE
 builder, Python nodes, tests and this document). Frame: `base_link` X forward,
@@ -9,56 +16,75 @@ Y left, Z up.
 - Corridor 1.60 m, doorways 1.10 m (`shared/onsen_layout.json`)
 - Traversable stairs: resting-deck steps, risers 45 mm and 90 mm
 - Bath rims 280 mm — must be **unclimbable** (water = kill hazard)
-- Wet tile friction zones (μ 0.45 wet / 0.8 dry)
-- Firmware fixes the actuator class: 6 bus servos 0–180°, pulse 500–2500 µs;
-  wheel radius 0.07 m, track 0.47 m, max 12 rad/s -> 0.84 m/s top speed
+- Wet tile friction zones (μ 0.45 wet / 0.8 dry) modelled even though Concept A
+  is an indoor-dry build — the wet-floor failure modes still exercise the stack
+- Firmware fixes the actuator class: 6 Dynamixel bus servos 0–180°; two driven
+  wheels Ø200 mm (radius 0.10 m), track 0.50 m, max 12 rad/s → 1.2 m/s top speed
 
 ## Chassis and drivetrain
 
-- Tub 0.62 × 0.42 × 0.14 m, overall width incl. wheels 0.52 m, LIDAR top 0.67 m,
-  mass budget 17 kg (frame 5.5, hub motors 3.0, battery 2.5, electronics 1.0,
-  sensors 0.7, arm 1.8, basket + payload 2.5)
-- Doorway margin (1.10 − 0.52)/2 = 0.29 m per side; spin diameter
-  √(0.68² + 0.52²) = 0.86 m < 1.10 m -> can turn around inside any doorway
-- 6 wheels Ø140 × 50 mm at x = ±0.24, 0 (wheelbase 0.48 m), each an independent
-  trailing-arm coil-over realized as a suspension raycast
-- **Suspension from the mass budget, not guessed**: static load ≈ 28 N/wheel,
-  60 mm travel with 15 mm sag -> k = 1850 N/m; damping ratio 0.65 -> c = 94 N·s/m
-- Step capability: 45 mm riser = 0.64 × wheel radius — climbable with
-  independent springs; the 90 mm second step works because the front axle is
-  already on the first step (phase climbing). The 280 mm rim is 2× wheel
-  diameter — geometrically impossible, the intended passive safety barrier,
-  with the water-contact e-stop as backstop
-- CoG at z ≈ 0.18 m (battery flat on the tub floor) -> static tip angles ≈ 50°;
-  arm at full reach + 0.3 kg towel shifts CoG < 40 mm — deep inside the support
-  polygon
+- Body 0.80 × 0.60 × 0.20 m structural shell (decks + LIDAR mast rise above it);
+  LIDAR top ≈ 0.66 m; body mass ≈ 22 kg
+- **Differential drive, centre-drive layout**: two driven Ø200 mm wheels on the
+  **centre** transverse axle (x = 0, track 0.50 m) + four Ø100 mm swivel casters
+  at the corners (x = ±0.30, y = ±0.24) for support. Putting the drive axle on
+  the centreline makes `base_link` the pivot, so a rotate-in-place sweeps only
+  the circumscribed radius (~0.52 m) rather than a wide arc, and the wheel-odom
+  turn model is truthful (a rear-axle pivot made the front swing ~0.67 m and
+  the odom drift on every turn, which rammed the robot into props). Zero-scrub
+  rotation, clean odometry, simple kinematics.
+- Spin diameter √(0.80² + 0.60²) = 1.00 m; the nav planner inflates to a
+  **0.55 m** circumscribed radius (incl. bumper ring). The onsen layout
+  (`shared/onsen_layout.json`) is scaled up ~1.6× so this larger footprint has
+  clear paths — the 0.42/0.62 m onsen robot's world was too tight for it.
+- Each wheel is an independent trailing-arm coil-over realized as a suspension
+  raycast. The driven and caster groups use different `attach_z` (0.03 vs
+  −0.02) so the body sits level at BASE_Z = 0.16 m despite the mixed diameters.
+- **Suspension from the mass budget, not guessed**: the driven pair sits behind
+  the CoG and carries ≈ 0.30/0.48 ≈ 62 % of the weight → ≈ 68 N/driven-wheel;
+  60 mm travel with the static deflection mid-band → k = 2250 N/m; damping
+  ratio ≈ 0.65 → c = 160 N·s/m
+- Step capability: 45 mm and 90 mm risers are climbable — the big Ø200 mm driven
+  wheels roll over them easily and the sprung Ø100 mm front casters absorb the
+  threshold shock (the classic caster-judder failure, solved by suspension).
+  The 280 mm bath rim is > 2× the caster diameter — geometrically impossible,
+  the intended passive safety barrier, with the water-contact e-stop as backstop
+- CoG at z ≈ 0.18 m (battery flat on the tub floor) → static tip angles ≫ the
+  5° ramp; arm at full reach + 0.35 kg towel shifts CoG well inside the support
+  polygon (driven axle to front casters)
 
 ## Rack architecture
 
 | Deck | z | Contents | Why |
 |---|---|---|---|
-| 0 (tub) | 0.06–0.20 | battery (center-rear), drivers, e-stop relay | counterweights the front arm; IP-skirted |
-| 1 | 0.34 | hardware tray: SBC, motor drivers, IMU at CoG, front sensor cluster, rear camera; also the collect-bin floor + load cell | open sides keep arm sweep + airflow clear |
-| 2 | 0.44+ | arm base front-center (x +0.26), **collect-bin tray spanning the deck** (rim 0.58), LIDAR mast front-right corner | pick workspace ahead; the whole top deck is payload volume |
+| 0 (tub) | 0.06–0.20 | battery (center-rear), drivers, e-stop relay | counterweights the front arm; over the driven axle |
+| 1 | 0.34 | hardware tray: SBC (RPi 5), motor drivers, IMU at CoG, front sensor cluster, rear camera; also the collect-bin floor + load cell | open sides keep arm sweep + airflow clear |
+| 2 | 0.44+ | arm base front-center (x +0.35, ahead of the front bumper at 0.412 so the pick crescent clears it), **collect-bin tray spanning the deck** (rim 0.58), LIDAR mast front-right corner | pick workspace ahead; the whole top deck is payload volume |
 
-Nothing except the mast and a DROP-phase wrist exceeds z 0.58 — a 40 mm guard
-band under the 0.62 m scan plane.
+Nothing except the mast and a DROP-phase wrist exceeds z 0.58 — a guard band
+under the 0.66 m scan plane.
 
-## Sensor suite (modeled after real hardware)
+## Sensor suite (Concept A tier)
 
 | Sensor | Mount | Model | Key numbers |
 |---|---|---|---|
-| 360° LIDAR | mast, z 0.62 | RPLIDAR A1-class | 0.15–10 m, 360×1°, 8 Hz, σ ≈ 1 % of range |
-| Front RGB | z 0.38, pitch −15° | budget CMOS | HFOV 70°, 640×480, ~5 Hz |
-| Rear RGB | z 0.38, pitch −10° | same | reversing coverage |
-| Depth | z 0.36, pitch −20° | D435-class | 87° HFOV, 0.28–3 m, 320×240, σ ∝ z² |
+| 360° LIDAR | mast, z 0.66 | RPLIDAR A2 (indoor-dry, not IP-rated) | 0.15–12 m, 360×1°, 8 Hz, σ ≈ 1 % of range |
+| Front depth | z 0.36, pitch −20° | Luxonis OAK-D Lite (stereo) | 72° HFOV, 0.2–4 m, 320×240, σ ∝ z² |
+| Front RGB | z 0.42, pitch −15° | USB webcam | HFOV 70°, 640×480, ~5 Hz |
+| Rear RGB | z 0.42, pitch −10° | USB webcam | reversing coverage |
 | Sonar ×3 | nose, z 0.10, ±25/0° | HC-SR04-class | 15° cones, 0.02–4 m, steam-immune |
 | Bumper ring 360° | z 0.085, 8 segments | Roomba-class spring bumper | outermost shell, 12 mm proud; hit sector + `bearing_deg` in `/robot/contacts` (`bumper_front` … `bumper_rear_right`); struck segment flashes in the sim |
 | IMU | CoG | MEMS | 50 Hz, bias random-walk |
 
+The RPLIDAR A2 and the OAK-D Lite are the Concept-A downgrades from the v2-B
+dual-RPLIDAR-S2 / D455 tier: a single non-IP scanner (indoor-dry only) and one
+front stereo unit instead of a forward + wrist depth pair. The 3 sonar are kept
+as a cheap, optics-free low-obstacle safety layer even though the v2 Concept-A
+blurb omits them.
+
 ## Visibility and occlusion analysis (the core decision)
 
-The LIDAR plane at 0.62 m **sees**: walls (2.6 m), shower partitions (1.4 m),
+The LIDAR plane at 0.66 m **sees**: walls (2.6 m), shower partitions (1.4 m),
 lockers (1.9 m), make-up counter (0.85 m), upper sauna bench (0.85 m) —
 reliable SLAM-grade geometry.
 
@@ -72,97 +98,71 @@ single most important placement decision and is validated by e2e scenario 7
 
 Known limitations (documented, mitigated):
 
-- **Near-field pick blind zone**: depth floor coverage starts 0.31 m ahead but
-  picks happen at 0.15–0.50 m — the final 20 cm run on target memory
+- **Near-field pick blind zone**: depth floor coverage starts ~0.36 m ahead but
+  picks happen at 0.15–0.50 m — the final run is on target memory
   (measure-then-dead-reckon), standard on real pick robots
-- **Side blind zone below 0.34 m**: covered only by the contact skirt and the
+- **Side blind zone below deck 1**: covered only by the contact skirt and the
   arbitrator's rotation speed cap — matches real budget service robots
-- **Arm in scan plane**: only DROP poses cross z 0.62, ~1 s in the 70–90°
-  sector; the safety aggregator self-filters that sector while `/arm/state`
-  reports a DROP phase (`arm_scan_filter: true` in `/robot/state`)
+- **Arm in scan plane**: only DROP poses cross the LIDAR plane, ~1 s in the
+  70–90° sector; the safety aggregator self-filters that sector while
+  `/arm/state` reports a DROP phase (`arm_scan_filter: true` in `/robot/state`)
 
 ## Arm
 
-- Shoulder at z 0.50; links 0.25 / 0.25 / 0.20 m -> 0.70 m reach. Floor pick
+- Custom 6-DOF Dynamixel arm (XM430/XM540-class bus servos), ~0.35 kg payload.
+  Shoulder at z 0.50; links 0.25 / 0.25 / 0.20 m → 0.70 m reach. Floor pick
   0.45 m past the nose needs √(0.48² + 0.50²) = 0.69 m — reachable with margin
 - Joint order = firmware J0–J5: pan (0 right, 90 fwd, 180 left), shoulder,
   elbow, wrist pitch, wrist roll, gripper (0–90 mm parallel fingers)
 - Every named firmware pose is FK-validated in `frontend/tests/kinematics.test.js`
   (PICK_SCOOP fingertip within 15 mm of floor, DROP_BASKET above basket rim,
-  STOW under z 0.58) — the pose table and the 3D model cannot drift apart
+  STOW under the LIDAR plane) — the pose table and the 3D model cannot drift apart
 - Servo dynamics: 200 °/s at SPEED 100, first-order lag τ = 80 ms — visible
   tracking error in `/joint_states`
-- Payload check: 0.3 kg towel at full reach ≈ 2.1 N·m at the shoulder — inside
-  bus-servo torque (~25 kg·cm geared)
-- Key poses: `DROP_BASKET` (over-the-shoulder arc, release at (−0.07, 0, 0.66)
-  above the deck-bin rim), `BIN_PICK` (reach back INSIDE the deck bin,
-  fingertip z 0.42) and `DROP_BIN` (pan 178°, extended links, release 0.72 m
-  from base center at z 0.66) — the extended pose exists because the robot
-  body can never get closer than bin-half + robot-half ≈ 0.62 m to a floor
-  bin's center, so a short-radius drop cannot reach over a bin rim
+- Payload check: 0.35 kg towel at full reach ≈ 2.4 N·m at the shoulder — inside
+  a geared XM540-class bus-servo torque budget
+- Key poses: `DROP_BASKET` (over-the-shoulder arc, release above the deck-bin
+  rim), `BIN_PICK` (reach back INSIDE the deck bin) and `DROP_BIN` (pan 178°,
+  extended links, release 0.72 m from base center) — the extended pose exists
+  because the robot body can never get closer than bin-half + robot-half to a
+  floor bin's center, so a short-radius drop cannot reach over a bin rim
 
 ## Collect bin (batch collection, top deck)
 
 - The **entire top deck is the bin**: an open-top tray, interior
   0.37 × 0.30 × 0.22 m (~24 L, 6+ crumpled towels), floor on the deck-1
-  hardware tray at z 0.36, **rim at z 0.58** — the 40 mm guard band under the
-  0.62 m lidar plane holds, and the tray sits FULLY inside the chassis
-  footprint (the earlier side basket overhung the body and bumped walls).
-  Deck 1 below carries all electronics (SBC, drivers, IMU); the lidar mast
-  moved to the front-right corner (small self-occlusion wedge toward the arm
-  column, redundantly covered by the front camera + sonar)
-- The bin sits BEHIND the arm's shoulder — unreachable by pan (0–180° covers
-  x ≥ 0.26) but reachable by the chain's **negative-radial arc**: DROP_BASKET
-  [90, 86…] keeps pan forward and arcs the arm up over its own shoulder,
-  releasing at (−0.07, 0, 0.66) above the rim. BIN_PICK reaches back INSIDE
-  the bin (fingertip z 0.42, elbow above the rim) to lift towels out again
-- Towels are carried **crumpled** (a grasped cloth bunches and stays bunched:
-  visual scale and collider both 0.195 × 0.143 × 0.081 m) so they land and
-  stack in the tray in any orientation; reset() un-crumples
-- **Load cell**: single-point strain gauge + HX711 under the bin floor (the
-  open-source standard weighing stack). FE publishes the measured weight on
-  `/robot/bin_load` at 2 Hz with noise; the base firmware (ATmega class)
-  debounce-thresholds it into `bin_full` at 0.70 kg ≈ 3 towels on
+  hardware tray at z 0.36, **rim at z 0.58** — the tray sits FULLY inside the
+  chassis footprint (no overhang). Deck 1 below carries all electronics; the
+  lidar mast sits at the front-right corner (small self-occlusion wedge toward
+  the arm column, redundantly covered by the front camera + sonar)
+- The bin sits BEHIND the arm's shoulder — unreachable by pan but reachable by
+  the chain's **negative-radial arc**: DROP_BASKET keeps pan forward and arcs
+  the arm up over its own shoulder. BIN_PICK reaches back INSIDE the bin to lift
+  towels out again
+- Towels are carried **crumpled** so they land and stack in the tray in any
+  orientation; reset() un-crumples
+- **Load cell**: single-point strain gauge + HX711 under the bin floor. FE
+  publishes the measured weight on `/robot/bin_load` at 2 Hz with noise; the
+  base firmware debounce-thresholds it into `bin_full` at 0.70 kg ≈ 3 towels on
   `/base/state`. The load cell closes THREE loops: **stow verification** (a
-  release only counts once the weight rises by a towel — a drop that misses
-  the bin sends the robot back to re-acquire, instead of "collecting" nothing
-  forever), **full detection**, and the **unload loop condition**
+  release only counts once the weight rises by a towel), **full detection**, and
+  the **unload loop condition**
 - **Delivery is BY ARM** (UNLOAD): BIN_PICK → CLOSE_GRIPPER → DROP_BIN →
-  release at z 0.66 over the 0.55 m floor-bin rim, one towel per cycle until
-  the load cell reads empty (guards: cycle cap + no-progress ⇒ leftover rides
-  to the next trip and is excluded from re-delivery until new weight arrives).
-  A servo tilt-dump of the deck tray was rejected on geometry: its hinge is
-  capped at the 0.58 rim (lidar guard band), so tilted contents exit BELOW the
-  0.55 floor-bin rim and cannot clear it. The `BIN DUMP`/`BIN HOME` servo
-  channel remains in the base firmware as a maintenance/floor-dump feature
-- Mass budget: 3 towels = 0.75 kg against the 2.5 kg "basket + payload"
-  allocation; CoG rises < 15 mm; the tray adds nothing to the footprint —
-  nav plans with ROBOT_RADIUS 0.36, bumper recovery as backstop
+  release over the floor-bin rim, one towel per cycle until the load cell reads
+  empty. The `BIN DUMP`/`BIN HOME` servo channel remains in the base firmware
+  as a maintenance/floor-dump feature
 - Mission policy: PICK → STOW (load-cell-verified) → SEARCH … until `bin_full`
-  or no towels remain, then one TO_BIN → ALIGN_BIN → UNLOAD trip — ~3× fewer
-  delivery legs than per-towel delivery
-- **Grasp is a physics joint**: closing the gripper within the grasp radius
-  creates a fixed joint to the still-dynamic towel; carried mass is pushed
-  back onto the chassis (suspension visibly settles); release restores normal
-  dynamics with the fingertip velocity
-- **Kinematic carry (no physics joint)**: on grasp the held item's Rapier body
-  is switched to `KinematicPositionBased` and driven directly to
-  `fingertip + carryOffset` every tick. The item tracks the arm exactly: no
-  joint stress, no wall-sticking (HELD_GROUPS prevents collisions, kinematic
-  body ignores forces), no depenetration surprises on release. On release the
-  body switches back to `Dynamic` and receives the current fingertip velocity
-  so it flies out realistically. Visual mesh is morphed to a bunched-cloth
-  scale while held and restored to flat on release
+  or no towels remain, then one TO_BIN → ALIGN_BIN → UNLOAD trip
+- **Grasp is a physics joint / kinematic carry**: on grasp the held item's
+  Rapier body switches to `KinematicPositionBased` and is driven to
+  `fingertip + carryOffset` every tick — no joint stress, no wall-sticking. On
+  release it switches back to `Dynamic` with the current fingertip velocity
 - **Holding detection — two signals**: the mission gates on the gripper's own
-  grasp-state feedback (`/robot/held_object`, the reliable "did my commanded
-  grasp engage an object" flag a real gripper controller reports). A wrist load
-  cell provides an independent force-based confirmation: the FE reports the
-  payload weight (`mass·g`, N) on the wrist joint's effort channel of
-  `/joint_states` — pose-independent, unlike shoulder torque which vanishes at
-  the lifted pose — which `arm_controller` thresholds (debounced) into
-  `gripper_holding` on `/arm/state`, surfaced as telemetry in `/mission/state`.
-  See docs/research_notes.md for why the direct grasp-state feedback is the
-  control gate and the force signal is confirmation-only
+  grasp-state feedback (`/robot/held_object`); a wrist load cell provides
+  independent force-based confirmation on the wrist effort channel of
+  `/joint_states`, thresholded into `gripper_holding` on `/arm/state`. See
+  docs/research_notes.md for why the direct grasp-state feedback is the control
+  gate and the force signal is confirmation-only
 
 ## Industrial design
 

@@ -18,7 +18,7 @@ test('sensors: lidar/cameras/depth/sonar/imu publish at healthy rates', async ({
   // park in the corridor facing the west cold bath: rim ahead, below the scan
   // plane. Pose places the LIDAR (front-right corner mast since the top-deck
   // bin redesign) on the same sightline the original rear-center mast had.
-  await page.evaluate(() => window.__sim.setPose(-0.44, -3.95, Math.PI));
+  await page.evaluate(() => window.__sim.setPose(-0.704, -6.32, Math.PI));
 
   await sleep(10_000);
 
@@ -45,7 +45,7 @@ test('sensors: lidar/cameras/depth/sonar/imu publish at healthy rates', async ({
   // bottom of the depth frame: forward beams must read the far wall instead
   const mid = Math.floor(scan.ranges.length / 2);
   const fwd = scan.ranges.slice(mid - 5, mid + 5).filter((r) => Number.isFinite(r));
-  for (const r of fwd) expect(r, 'scan plane must clear the bath rim').toBeGreaterThan(2.0);
+  for (const r of fwd) expect(r, 'scan plane must clear the bath rim').toBeGreaterThan(3.2);
 
   const depth = probe.received('/camera/depth/image_raw').at(-1);
   expect(depth.width).toBe(320);
@@ -67,7 +67,7 @@ test('sensors: lidar/cameras/depth/sonar/imu publish at healthy rates', async ({
   const low = probe.received('/scan_low').at(-1);
   const finiteLow = low.ranges.filter((r) => r !== null && Number.isFinite(r));
   expect(finiteLow.length, '/scan_low must return low obstacles').toBeGreaterThan(3);
-  expect(Math.min(...finiteLow)).toBeLessThan(2.0);
+  expect(Math.min(...finiteLow)).toBeLessThan(3.2);
 
   probe.close();
 });
