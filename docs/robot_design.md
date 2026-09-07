@@ -34,7 +34,9 @@ Y left, Z up.
   the odom drift on every turn, which rammed the robot into props). Zero-scrub
   rotation, clean odometry, simple kinematics.
 - Spin diameter √(0.80² + 0.60²) = 1.00 m; the nav planner inflates to a
-  **0.55 m** circumscribed radius (incl. bumper ring). The onsen layout
+  **0.62 m** radius (circumscribed 0.52 m + ~10 cm localization-error
+  margin — planning tighter ground the bumper corner into walls on
+  perception-targeted approaches). The onsen layout
   (`shared/onsen_layout.json`) is scaled up ~1.6× so this larger footprint has
   clear paths — the 0.42/0.62 m onsen robot's world was too tight for it.
 - Each wheel is an independent trailing-arm coil-over realized as a suspension
