@@ -5,9 +5,15 @@ import { GROUP_OBJECT, GROUP_WORLD, groups } from '../physics/world.js';
 // (stools, buckets, towels) that sit below the LIDAR plane, as well as walls.
 const QUERY = groups(0xffff, GROUP_WORLD | GROUP_OBJECT);
 
+// Ultrasound reflects specularly off smooth surfaces (tile, walls, floor): a
+// surface only echoes back to the transducer when struck within ~40 deg of its
+// normal. Without this the lower half of every cone "saw" the floor ~1 m out.
+const MAX_INCIDENCE_COS = Math.cos((40 * Math.PI) / 180);
+
 /** Ultrasonic ring: each transducer casts a fan of rays inside its cone and
- *  reports the minimum hit — the real beam-width artifact (wide objects read
- *  closer). Steam-immune by physics: sound, not light. */
+ *  reports the nearest echo — the real beam-width artifact (wide objects read
+ *  closer), plus specular dropout (oblique walls and the floor return nothing,
+ *  so the sensor reads max range). Steam-immune by physics: sound, not light. */
 export class SonarSensor {
   constructor(spec, physics, robot, rng, ros, clock) {
     this.spec = spec.sensors.sonar;
@@ -44,8 +50,10 @@ export class SonarSensor {
           Math.sin(yawOff) * Math.cos(pitchOff),
           Math.sin(pitchOff),
         ]);
-        const hit = this.physics.castRay(origin, dir, this.spec.range_max, QUERY, this.robot.body);
-        if (hit && hit.toi < min) min = hit.toi;
+        const hit = this.physics.castRayNormal(origin, dir, this.spec.range_max, QUERY, this.robot.body);
+        if (!hit || hit.toi >= min) continue;
+        const incidence = -(dir.x * hit.normal.x + dir.y * hit.normal.y + dir.z * hit.normal.z);
+        if (incidence >= MAX_INCIDENCE_COS) min = hit.toi;
       }
       let range = Number.isFinite(min) ? min + this.rng.gaussian(0, this.spec.noise_std) : this.spec.range_max;
       range = Math.max(this.spec.range_min, Math.min(this.spec.range_max, range));

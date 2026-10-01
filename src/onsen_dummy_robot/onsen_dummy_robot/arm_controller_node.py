@@ -9,11 +9,12 @@ Topics:
                       load-cell effort feeds ArmFirmware.observe_effort ->
                       gripper_holding in /arm/state (a real force-sensing
                       feedback channel, not a ground-truth shortcut — see
-                      arm_protocol.py)
+                      arm_protocol.py); measured gripper angle -> jaw_stalled
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 
@@ -28,6 +29,8 @@ CAL_PATH = os.environ.get("ARM_CAL_PATH", "/ros2_ws/output/arm_calibration.json"
 # The FE reports the payload weight (mass * g) on the wrist joint's effort
 # channel — the pose-independent wrist load-cell reading (see arm.js).
 WRIST_JOINT_NAME = "wrist_pitch_joint"
+# Measured gripper servo angle: jaw-stall (object squeezed) detection.
+GRIPPER_JOINT_NAME = "gripper_joint"
 
 
 class ArmControllerNode(Node):
@@ -46,12 +49,16 @@ class ArmControllerNode(Node):
         self.get_logger().info("ArmControllerNode ready — /arm/command accepted")
 
     def _on_joint_states(self, msg: JointState) -> None:
-        try:
-            idx = msg.name.index(WRIST_JOINT_NAME)
-        except ValueError:
-            return
-        if idx < len(msg.effort):
-            self._fw.observe_effort(msg.effort[idx])
+        names = list(msg.name)
+        if WRIST_JOINT_NAME in names:
+            idx = names.index(WRIST_JOINT_NAME)
+            if idx < len(msg.effort):
+                self._fw.observe_effort(msg.effort[idx])
+        if GRIPPER_JOINT_NAME in names:
+            idx = names.index(GRIPPER_JOINT_NAME)
+            if idx < len(msg.position):
+                # /joint_states radians are (servo_deg - 90) — see jointStates.js
+                self._fw.observe_jaw(math.degrees(msg.position[idx]) + 90.0)
 
     def _on_command(self, msg: String) -> None:
         for line in msg.data.splitlines():

@@ -11,22 +11,22 @@ Names live in exactly two mirrored registries:
 
 | Topic | Type | Rate | Notes |
 |---|---|---|---|
-| `/scan` | `sensor_msgs/LaserScan` | 8 Hz | 360 beams batched across physics ticks; material/steam dropout; real self-hits during arm DROP |
+| `/scan` | `sensor_msgs/LaserScan` | 8 Hz | 360 beams batched across physics ticks (`angle_max = angle_min + 359·inc`); scan plane tilts with the chassis; returns under `range_min` are no-return (reported as `range_max`); material/steam dropout; real self-hits during arm DROP |
 | `/camera/front/image_raw/compressed` | `sensor_msgs/CompressedImage` | ~5 Hz | 640×480 JPEG, pitch −15° |
 | `/camera/front/camera_info` | `sensor_msgs/CameraInfo` | ~5 Hz | intrinsics derived from the actual projection |
 | `/camera/rear/image_raw/compressed` + `camera_info` | — | ~5 Hz | reversing coverage, pitch −10° |
 | `/camera/depth/image_raw` | `sensor_msgs/Image` 16UC1 (mm) | ~5 Hz | 320×240, σ ∝ z², invalid at grazing/specular |
 | `/camera/depth/camera_info` | `sensor_msgs/CameraInfo` | ~5 Hz | |
-| `/sonar/range_0..2` | `sensor_msgs/Range` | 15 Hz | bearings −25/0/+25°, cone min-hit, steam-immune |
-| `/imu` | `sensor_msgs/Imu` | 50 Hz | at CoG; suspension oscillation visible; bias random-walk |
-| `/odom` + `/tf` | `nav_msgs/Odometry` | 20 Hz | encoder-integrated — drifts under slip (by design) |
-| `/joint_states` | `sensor_msgs/JointState` | 20 Hz | measured (lagging) arm joints + 2 driven wheels |
+| `/sonar/range_0..2` | `sensor_msgs/Range` | 15 Hz | bearings −25/0/+25°, nearest echo in the cone; specular: surfaces hit > 40° off-normal (floor, oblique walls) return nothing → `max_range`; steam-immune |
+| `/imu` | `sensor_msgs/Imu` | 50 Hz | at CoG; suspension oscillation visible; bias random-walk. `orientation` = on-board Mahony filter over the noisy gyro/accel: roll/pitch gravity-corrected, **yaw relative to power-on and drifting** (not map heading; yaw variance 0.1) |
+| `/odom` + `/tf` | `nav_msgs/Odometry` | 20 Hz | encoder-integrated — drifts under slip (by design); pose covariance grows with travel (2 % of distance, 5 % of rotation) |
+| `/joint_states` | `sensor_msgs/JointState` | 20 Hz | measured (lagging) arm joints + velocities + 2 driven wheels. `gripper_joint` position STALLS at the cloth bite width when the jaws squeeze a towel; effort: `wrist_pitch_joint` = wrist load cell m·\|a−g\| (N, noisy, ~0 until the towel is lifted off the floor), `gripper_joint` = grip force (N) |
 | `/robot/contacts` | `std_msgs/String` JSON | event | `{part, impulse, normal, object_id, object_class, critical}` |
 | `/ground_truth/pose` | `geometry_msgs/PoseStamped` | 10 Hz | for drift quantification |
-| `/ground_truth/objects` | `std_msgs/String` JSON | 5 Hz | true object states for labeling/eval |
+| `/ground_truth/objects` | `std_msgs/String` JSON | 5 Hz | true object states for labeling/eval; towels add `state` (`folded`/`crumpled`), `wetness` (0–1), `mass_kg` |
 | `/sim/status` | `std_msgs/String` JSON | 1 Hz | `{alive, session_id, sim_time, fps}` heartbeat; `session_id` change = FE restart (see SessionWatch) |
-| `/robot/held_object` | `std_msgs/String` JSON | on change | `{held, object_id, object_class, position}` — gripper payload sensor |
-| `/robot/bin_load` | `std_msgs/String` JSON | 2 Hz | `{kg, count, tilt_deg}` — collect-bin load cell (strain gauge + HX711); base firmware thresholds into `bin_full` |
+| `/robot/held_object` | `std_msgs/String` JSON | on change + 1 Hz | `{held, jaw_width_m, grip_force_n, payload_n}` — gripper controller's own grasp flag (jaws stalled on an object). No identity/class/position: that is perception's job |
+| `/robot/bin_load` | `std_msgs/String` JSON | 2 Hz | `{kg, tilt_deg}` — collect-bin load cell (strain gauge + HX711, seeded noise); weight only — damp towels weigh 0.18–0.42 kg so weight ≠ count; base firmware thresholds into `bin_full` |
 
 ## Control
 
@@ -54,7 +54,7 @@ Names live in exactly two mirrored registries:
 | `/arm/command` | in | serial protocol: `Q`, `A <ACTION>`, `J d0..d5 ms`, `D j Δ ms`, `M ALIAS amt ms`, `G pos ms`, `SPEED`, `STOP`, `CAL …`, `RELAX/WAKE` |
 | `/arm/response` | out | firmware replies, e.g. `STATE 90 90 90 90 90 70 IDLE`, `ERR LIMIT joint=0 value=295` |
 | `/arm/joint_targets` | out 20 Hz | `{"deg": [×6], "status", "ts"}` — FE servo targets |
-| `/arm/state` | out 10 Hz | `{joints_deg, status, speed_pct, relaxed, last_action, queue_depth}` |
+| `/arm/state` | out 10 Hz | `{joints_deg, status, speed_pct, relaxed, last_action, queue_depth, gripper_holding, payload_force_n, jaw_measured_deg, jaw_stalled}` — `jaw_stalled`: measured gripper angle > commanded + 4° once idle (squeezing an object) |
 
 ## Safety + fused state (`robot_state`)
 
@@ -64,7 +64,7 @@ Names live in exactly two mirrored registries:
 | `/safety/reset` | in | `std_msgs/Bool` operator reset (refused while hazard active) |
 | `/safety/enable` | in | `std_msgs/Bool` arm/disarm the e-stop latch (FE `E-STOP` toggle; default disarmed, `SAFETY_ENABLED=true` to arm at boot); disarming clears latches |
 | `/robot/state` | out 5 Hz | fused JSON: `{safety_enabled, safety_stop, safety_critical, tilt_deg, min_obstacle_m, arm_scan_filter, odom, arm, base, last_contact}` |
-| `/robot/events` | out | safety + sim events (`SAFETY_IMPACT`, `OBJECT_BINNED`, `TOWEL_THROWN`, `GRASP_ACQUIRED`, `GRASP_RELEASED`, …) |
+| `/robot/events` | out | safety + sim events (`SAFETY_IMPACT`, `OBJECT_BINNED`, `TOWEL_THROWN`, `GRASP_ACQUIRED`, `GRASP_RELEASED`, `GRASP_SLIPPED` (cloth pulled out of the jaws mid-carry), `ARM_CONTACT`, …). `OBJECT_BINNED` is evaluation scoring: fired only when the object is inside a bin's interior below the rim |
 
 `GRASP_ACQUIRED`/`GRASP_RELEASED` are emitted by the FE gripper (payload-sensor
 emulation) when the grasp joint forms/breaks — the mission's `holding` signal,

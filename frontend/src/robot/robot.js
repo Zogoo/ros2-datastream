@@ -11,7 +11,7 @@ const LED_COLORS = {
 
 /** The robot: dynamic chassis + raycast suspension + racked decks + 6-axis arm. */
 export class Robot {
-  constructor(physics, scene, spec, spawn, objects) {
+  constructor(physics, scene, spec, spawn, objects, rng = null) {
     this.physics = physics;
     this.spec = spec;
     this.objects = objects;
@@ -43,7 +43,7 @@ export class Robot {
     this._buildBasketColliders();
     this._buildBumperRing();
     this.suspension = new WheelSuspension(physics, this.body, spec);
-    this.arm = new Arm(physics, this, spec.arm, objects);
+    this.arm = new Arm(physics, this, spec.arm, objects, rng);
 
     this.group = new THREE.Group();
     scene.add(this.group);
@@ -207,7 +207,7 @@ export class Robot {
     for (const item of this.objects.items) {
       if (item.held || item.binned) continue;
       if (this.binContains(item.body.translation())) {
-        kg += item.body.mass();
+        kg += item.massKg ?? item.body.mass();
         count += 1;
       }
     }

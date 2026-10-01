@@ -15,14 +15,23 @@ export class JointStateSensor {
     this.ros = ros;
     this.clock = clock;
     this.accumulator = 0;
+    this.sinceLast = 0;
+    this.lastArmRad = null;
   }
 
   update(dt) {
     this.accumulator += dt;
+    this.sinceLast += dt;
     if (this.accumulator < 1 / this.hz) return;
     this.accumulator %= 1 / this.hz;
 
     const armRad = this.robot.arm.current.map((d) => round3(((d - 90) * Math.PI) / 180));
+    // Servo present-velocity (Dynamixel reports it), from measured positions.
+    const armVel = this.lastArmRad
+      ? armRad.map((r, i) => round3((r - this.lastArmRad[i]) / this.sinceLast))
+      : armRad.map(() => 0);
+    this.lastArmRad = armRad;
+    this.sinceLast = 0;
     // Only the two driven wheels carry encoders; the front casters are unmeasured.
     const driven = this.robot.suspension.driven;
     const wheelAngles = driven.map((w) => round3(w.encoderAngle));
@@ -32,7 +41,7 @@ export class JointStateSensor {
       header: { stamp: this.clock.stamp(), frame_id: '' },
       name: [...ARM_JOINT_NAMES, ...WHEEL_JOINT_NAMES],
       position: [...armRad, ...wheelAngles],
-      velocity: [...ARM_JOINT_NAMES.map(() => 0), ...wheelVels],
+      velocity: [...armVel, ...wheelVels],
       effort: [...this.robot.arm.effort, ...driven.map(() => 0)],
     });
   }

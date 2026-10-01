@@ -25,7 +25,7 @@ export class ContactSensor {
       if (!otherMeta || otherMeta.kind === 'floor' || otherMeta.kind === 'platform') return;
 
       const force = event.totalForceMagnitude();
-      const impulse = force / 60;
+      const impulse = force * this.clock.step;   // force over one physics step
       // 360° bumper ring (Roomba-style): resolve which skirt sector was hit
       // from the contact force direction. The world pushes the robot AWAY
       // from the obstacle, so the obstacle bears opposite the force the

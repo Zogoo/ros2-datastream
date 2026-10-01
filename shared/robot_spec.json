@@ -109,8 +109,13 @@
     "servo_lag_tau_s": 0.08,
     "gripper": {
       "max_opening_m": 0.09,
-      "grasp_radius_m": 0.14,
-      "close_deg_threshold": 30.0
+      "close_deg_threshold": 30.0,
+      "jaw_reach_m": 0.045,
+      "jaw_edge_catch_m": 0.015,
+      "min_bite_m": 0.004,
+      "grip_force_max_n": 7.0,
+      "payload_max_kg": 0.35,
+      "wrist_load_cell_noise_n": 0.04
     }
   },
   "sensors": {

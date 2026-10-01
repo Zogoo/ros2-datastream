@@ -75,7 +75,10 @@ async function boot() {
   const world = new OnsenWorld(config.layout, config.objects, physics, scene);
   const objects = new ObjectManager(config.layout, config.objects, physics, scene, world);
   const steam = new Steam(world.steamZones, scene);
-  const robot = new Robot(physics, scene, spec, config.layout.robot_spawn, objects);
+  // Separate RNG stream for the gripper (cloth variability, load-cell noise)
+  // so grasp outcomes do not shift every other sensor's noise sequence.
+  const robot = new Robot(physics, scene, spec, config.layout.robot_spawn, objects, createRng(spec.rng_seed + 101));
+  const loadCellRng = createRng(spec.rng_seed + 202);
 
   // ── ROS ───────────────────────────────────────────────────────────────────
   const ros = new RosBridge(config.rosUrl);
@@ -137,8 +140,9 @@ async function boot() {
   let fps = 60;
   let lastFrame = performance.now();
   const dt = 1 / config.physicsHz;
-  let _prevHeldId = null;  // tracks last-published held_object id to publish only on change
+  let _prevHeld = null;    // last-published gripper grasp flag (publish on change)
   let _binLoadAccum = 0;   // 2 Hz cadence for the bin load-cell reading
+  let _gripAccum = 0;      // gripper status keepalive
 
   function frame(now) {
     const frameDelta = now - lastFrame;
@@ -187,27 +191,29 @@ async function boot() {
     if (_binLoadAccum >= 0.5) {
       _binLoadAccum %= 0.5;
       const load = robot.binLoad();
-      const noise = (Math.random() - 0.5) * 2 * (spec.basket.load_cell?.noise_kg ?? 0.005);
+      // A load cell measures weight only — it cannot count towels (the count
+      // was a ground-truth leak; damp towels weigh 0.18-0.42 kg each).
+      const noise = loadCellRng.gaussian(0, spec.basket.load_cell?.noise_kg ?? 0.005);
       ros.publish(TOPICS.binLoad, {
         data: JSON.stringify({
           kg: Math.max(0, Math.round((load.kg + noise) * 1000) / 1000),
-          count: load.count,
           tilt_deg: Math.round(robot.binTilt),
         }),
       });
     }
 
-    // Publish held-object state whenever the held item changes.
-    // Represents a combined gripper-width + payload sensor: tells the mission
-    // node what class of object is in the gripper without requiring camera vision.
-    const _curHeldId = robot.arm.heldItem?.id ?? null;
-    if (_curHeldId !== _prevHeldId) {
-      _prevHeldId = _curHeldId;
-      const info = robot.arm.heldObjectInfo();
+    // Gripper grasp-state feedback (published on change + 1 Hz keepalive):
+    // what the gripper controller itself knows — jaws stalled on an object,
+    // measured jaw width, grip force, wrist payload. Like a real gripper's
+    // object-detected flag it carries NO identity/class/position: what was
+    // grasped is perception's job (/ground_truth/objects has it for eval).
+    _gripAccum += renderDt;
+    const held = robot.arm.holding();
+    if (held !== _prevHeld || _gripAccum >= 1.0) {
+      _prevHeld = held;
+      _gripAccum = 0;
       ros.publish(TOPICS.heldObject, {
-        data: JSON.stringify(info
-          ? { held: true, ...info, timestamp: new Date().toISOString() }
-          : { held: false, timestamp: new Date().toISOString() }),
+        data: JSON.stringify({ ...robot.arm.gripperStatus(), timestamp: new Date().toISOString() }),
       });
     }
 
@@ -249,6 +255,13 @@ async function boot() {
       return { x: p.x, y: p.y, z: p.z, held: item.held, binned: item.binned };
     },
     holding: () => robot.arm.holding(),
+    // gripper telemetry incl. the sim-internal grip load vs holding capacity
+    grip: () => ({
+      ...robot.arm.gripperStatus(),
+      load_n: robot.arm._grip?.loadN ?? null,
+      capacity_n: robot.arm._grip?.capacityN ?? null,
+      lifted: robot.arm._grip?.liftedOff ?? null,
+    }),
     muted: () => !!ros.muted,
     armFingertip: () => robot.arm.fkWorld?.[3] ?? null,
     depthStats: () => {

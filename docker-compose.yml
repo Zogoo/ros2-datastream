@@ -153,9 +153,10 @@ services:
       <<: *ros-env
     command: >
       ros2 launch foxglove_bridge foxglove_bridge_launch.xml
-      port:=8765
+      port:=${FOXGLOVE_PORT:-8765}
       address:=0.0.0.0
-    # port 8765 on host directly via network_mode: host
+    # port ${FOXGLOVE_PORT:-8765} on host directly via network_mode: host
+    # (set FOXGLOVE_PORT when another local service already owns 8765)
 
   rosbridge:
     <<: *ros-base

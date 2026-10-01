@@ -189,6 +189,18 @@ physics forces — the item tracks the arm exactly. On release, switch back to
 Visual feedback: mesh scale morphs on attach (`0.7×0.7×2.5`, bunched cloth)
 and restores on release (`1×1×1`, flat towel).
 
+**Superseded (cloth + pinch realism pass):** the world-frame `carryOffset`
+was wrong whenever the arm panned or the robot turned while carrying (the
+towel orbited the wrong way — up to 14 cm off during every UNLOAD swing), and
+the 0.14 m `grasp_radius_m` snap grabbed towels the open jaws were nowhere
+near. Now: the towel hangs below the jaws in the gripper heading; grasping is
+the geometric pinch described in `docs/robot_design.md` (jaw stall, grip-force
+capacity, slip); crumpling swaps the collider for a rounded heap instead of
+scaling a brick. Towel mass is wetness-driven (see `object_profiles.json`
+`cloth`). Grasp outcome is stochastic via a seeded RNG stream (cloth
+variability ×0.75–1.1 on bite quality), so pick success is a distribution the
+mission's retry/park logic must handle, not a certainty.
+
 ## Bumper recovery (Roomba behavior, with a map)
 
 iRobot's coverage robots amplify small impacts through a swing-arm bumper and

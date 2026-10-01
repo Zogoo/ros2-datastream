@@ -80,7 +80,10 @@ class TowelTrackerNode(Node):
             event = json.loads(msg.data)
         except json.JSONDecodeError:
             return
-        if event.get("event") in ("GRASP_ACQUIRED", "OBJECT_BINNED") and self._pose is not None:
+        # Only the robot's own gripper edge: OBJECT_BINNED is an evaluation
+        # (ground-truth) event the robot cannot sense — and a towel that
+        # missed the floor bin must stay a live target, not be forgotten.
+        if event.get("event") == "GRASP_ACQUIRED" and self._pose is not None:
             # the towel at the gripper is gone from the floor — forget it
             rx, ry, ryaw = self._pose
             gx = rx + 0.6 * math.cos(ryaw)

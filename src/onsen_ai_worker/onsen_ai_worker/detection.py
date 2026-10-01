@@ -56,6 +56,13 @@ RISK_MAP = {
 }
 
 
+# Classes that lie flat on the floor (footprint-centre positioning).
+FLAT_CLASSES = frozenset({"towel"})
+# Nominal half-depth of a towel's floor footprint (folded 0.22-0.34 m,
+# crumpled ~0.2 m) for when only its far edge is visible.
+FLAT_HALF_DEPTH_M = 0.12
+
+
 class CameraModel:
     """Pinhole ground-plane back-projection from the front camera mount."""
 
@@ -192,6 +199,39 @@ class Detector:
         self.camera = camera_model
         self._load_store()
 
+    def footprint_center(self, cls: str, x: float, y: float, w: float, h: float) -> dict | None:
+        """Floor position of a detection. A tall object (stool, bucket) stands
+        on its bbox foot. A FLAT object's bbox spans its whole floor footprint:
+        the bottom row is its NEAR edge and the top row its FAR edge, so the
+        footprint centre is the midpoint of the two floor back-projections.
+        (Using the foot for a towel aimed every grasp at the towel's near edge
+        — up to half its depth short.)"""
+        assert self.camera is not None
+        foot = self.camera.pixel_to_base_link(x + w / 2, y + h)
+        if cls not in FLAT_CLASSES or foot is None:
+            return foot
+        far = self.camera.pixel_to_base_link(x + w / 2, y)
+        if far is None:
+            return foot
+        if y + h >= self.camera.height - 2:
+            # Near edge cut off by the frame bottom (the pick-range blind
+            # zone): the bbox foot is the image border, not the towel. Only
+            # the far edge is real — step back from it by a nominal half-depth
+            # along the viewing ray.
+            dx, dy = far["x"] - self.camera.mount_x, far["y"]
+            d = math.hypot(dx, dy) or 1e-6
+            back = min(FLAT_HALF_DEPTH_M, d - (foot["x"] - self.camera.mount_x))
+            return {
+                "x": round(far["x"] - dx / d * back, 2),
+                "y": round(far["y"] - dy / d * back, 2),
+                "z": 0.0,
+            }
+        return {
+            "x": round((foot["x"] + far["x"]) / 2, 2),
+            "y": round((foot["y"] + far["y"]) / 2, 2),
+            "z": 0.0,
+        }
+
     # ── Profile management (skin pipeline) ───────────────────────────────────
 
     def resample_profile(self, cls: str, img_bgr: np.ndarray) -> dict[str, Any]:
@@ -284,7 +324,7 @@ class Detector:
                 confidence = round(min(0.98, 0.4 + fill * 0.4 + min(area, 20000) / 50000.0), 2)
                 position = None
                 if self.camera is not None:
-                    position = self.camera.pixel_to_base_link(x + w / 2, y + h)
+                    position = self.footprint_center(cls, x, y, w, h)
 
                 results.append({
                     "id": f"det_{obj_id:03d}",

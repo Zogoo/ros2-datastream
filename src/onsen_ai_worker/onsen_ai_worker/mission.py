@@ -28,6 +28,10 @@ IkReach = Callable[[float, float], "str | None"]
 # geometry — i.e. the scoop will not press the fingertip into a wall. Injected
 # by the executor from the nav grid (same seam pattern as IkReach).
 ReachClear = Callable[[tuple[float, float], tuple[float, float]], bool]
+# dock_clear(pre_dock_xy, docked_xy) -> the robot can stand at the pre-dock
+# pose AND drive straight from it to the docked pose without hitting mapped
+# geometry other than the bin it docks beside.
+DockClear = Callable[[tuple[float, float], tuple[float, float]], bool]
 
 # Alternate approach bearings (rad, relative to the anchor direction) tried
 # when the direct standoff would sweep the arm into a wall. Ordered by how
@@ -45,6 +49,22 @@ SCOOP_FORWARD = 0.757     # m, fingertip ahead of base center at PICK_SCOOP
 # of the deck bin cannot: its hinge is capped at the 0.58 lidar guard band, so
 # contents would exit below the rim). ALIGN_BIN points this offset at the bin.
 DELIVER_OFFSET = (0.37, 0.66)  # m, DROP_BIN release point in base_link
+# Docking geometry. The robot CANNOT stand where the floor bin's centre sits
+# under the release point: a 0.88 m bin centred 0.66 m to the left reaches
+# 0.22 m from the robot's centreline, inside its 0.32 m half-width (the old
+# standoff drove the bumper into the bin and its goal was snapped ~1 m away,
+# so towels were released short of the bin). Instead the robot docks with its
+# LEFT side parallel to one bin face, DOCK_SIDE_GAP away: the bin centre then
+# lies at base_link (DELIVER_OFFSET[0], lateral) and the release point lands
+# lateral - 0.66 = 0.17 m inside the bin from its centre — well within the
+# 0.43 m interior half-width.
+ROBOT_HALF_WIDTH = 0.312     # m, chassis half-width + bumper standoff
+DOCK_SIDE_GAP = 0.08         # m, robot side to bin face when docked
+DOCK_RUN = 0.7               # m, straight final run along the face
+DOCK_SPEED = 0.12            # m/s
+DOCK_DONE_TOL = 0.03         # m short of the docked pose counts as docked
+DOCK_MAX_TICKS = 150         # ~30 s at 5 Hz before the dock attempt is abandoned
+ALIGN_PICK_MAX_TICKS = 75    # ~15 s at 5 Hz: a target that can't be squared up = failed attempt
 PICK_TOL_X = 0.08
 PICK_TOL_Y = 0.08
 YAW_TOL = 0.08
@@ -135,8 +155,17 @@ class MissionLogic:
         bin_center: tuple[float, float],
         ik_reach: IkReach | None = None,
         reach_clear: ReachClear | None = None,
+        bin_half: float = 0.44,
+        dock_clear: DockClear | None = None,
     ) -> None:
         self.bin_center = bin_center
+        self.bin_half = bin_half
+        # dock_clear(pre_dock, docked) -> that face's docking run is free of
+        # mapped geometry. When unset, the face nearest the robot is used.
+        self._dock_clear = dock_clear
+        self._dock: dict[str, Any] | None = None   # chosen face for this trip
+        self._dock_ticks = 0
+        self._align_ticks = 0
         # ik_reach(rel_x, rel_y) -> firmware "J ..." line reaching that base_link
         # point at GRASP_Z, or None if unreachable. When unset, the canned
         # PICK_SCOOP pose is used (fixed 0.757 m ahead).
@@ -267,6 +296,12 @@ class MissionLogic:
         if towel is None:
             self._enter("SEARCH")
             return MissionOutput(state="ALIGN_PICK", reason="target lost")
+        self._align_ticks += 1
+        if self._align_ticks > ALIGN_PICK_MAX_TICKS:
+            # Bounded: never rotate/creep forever on a target that won't
+            # settle (bad measurement, unreachable spot) — count it as a
+            # failed attempt so the retry/park logic takes over.
+            return self._record_pick_failure("ALIGN_PICK", "could not align — retry")
         # Prefer the direct camera measurement of the towel in base_link (immune
         # to localization drift) for the final alignment + reach; fall back to
         # the map track converted through the localized pose only when no fresh
@@ -274,6 +309,7 @@ class MissionLogic:
         rel = inp.target_rel or world_to_robot(towel["position"], inp.pose)
         if abs(rel[0] - SCOOP_FORWARD) < PICK_TOL_X and abs(rel[1]) < PICK_TOL_Y:
             self.state = "PICK"
+            self._align_ticks = 0
             self._seq = _SeqState(commands=self._build_pick_sequence(rel))
             return MissionOutput(state="ALIGN_PICK", twist=(0.0, 0.0), reason="in pick window")
         # bearing first, then close the longitudinal gap — gentle, low speed.
@@ -284,7 +320,9 @@ class MissionLogic:
         if abs(bearing) > ALIGN_ENTER_RAD or (self._aligning and abs(bearing) > ALIGN_EXIT_RAD):
             self._aligning = True
             wz = max(-0.5, min(0.5, 1.5 * bearing))
-            return MissionOutput(state="ALIGN_PICK", twist=(0.0, wz), reason="aligning bearing")
+            src = "camera" if inp.target_rel else "track"
+            return MissionOutput(state="ALIGN_PICK", twist=(0.0, wz),
+                                 reason=f"aligning bearing {bearing:+.2f} rad ({src})")
         self._aligning = False
         vx = max(-0.08, min(0.10, 0.4 * (rel[0] - SCOOP_FORWARD)))
         return MissionOutput(state="ALIGN_PICK", twist=(vx, 0.0),
@@ -338,39 +376,90 @@ class MissionLogic:
         return MissionOutput(state="STOW", reason="stowed — continue collecting")
 
     def _state_to_bin(self, inp: MissionInput) -> MissionOutput:
+        """Navigate to the pre-dock pose of a bin face (bin on the robot's
+        left, heading along the face). ALIGN_BIN then makes the straight
+        docking run."""
         if inp.bin_kg < BIN_MIN_DELIVER_KG and not inp.holding:
             self._enter("SEARCH")
             return MissionOutput(state="TO_BIN", nav_cancel=True,
                                  reason="bin empty — nothing to deliver")
-        # Same anchor-freeze as APPROACH: bin_center is fixed, but recomputing
-        # the standoff direction from the live pose every tick made the goal
-        # drift past RETARGET_DIST as the A* path curved, churning replans.
-        if self._nav_anchor is None:
-            self._nav_anchor = (inp.pose["x"], inp.pose["y"])
-        standoff = math.hypot(*DELIVER_OFFSET)
-        gx, gy = standoff_point(self.bin_center, self._nav_anchor, standoff)
-        # Face so the DROP_BIN release point lands over the floor bin.
-        beta = math.atan2(DELIVER_OFFSET[1], DELIVER_OFFSET[0])
-        goal_yaw = math.atan2(self.bin_center[1] - gy, self.bin_center[0] - gx) - beta
-        out = self._navigate(inp, (gx, gy, goal_yaw), "TO_BIN")
+        # Freeze the face choice for the trip: re-choosing from the live pose
+        # every tick would flip faces as the A* path curves (goal churn).
+        if self._dock is None:
+            self._dock = self.choose_dock((inp.pose["x"], inp.pose["y"]))
+        d = self._dock
+        out = self._navigate(inp, (d["pre"][0], d["pre"][1], d["yaw"]), "TO_BIN")
         if out is not None:
             return out
         self._enter("ALIGN_BIN")
-        return MissionOutput(state="TO_BIN", reason="at delivery standoff")
+        self._dock_ticks = 0
+        return MissionOutput(state="TO_BIN", reason="at pre-dock pose — docking")
+
+    def dock_poses(self) -> list[dict[str, Any]]:
+        """The four candidate dockings, one per bin face (outward normal n):
+        robot left side toward the bin => body +y = -n, heading x = (-n.y, n.x).
+        docked: bin centre at base_link (DELIVER_OFFSET[0], lateral)."""
+        lateral = self.bin_half + DOCK_SIDE_GAP + ROBOT_HALF_WIDTH
+        bx, by = self.bin_center
+        poses = []
+        for nx, ny in ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+            hx, hy = -ny, nx
+            cx = bx + nx * lateral - hx * DELIVER_OFFSET[0]
+            cy = by + ny * lateral - hy * DELIVER_OFFSET[0]
+            poses.append({
+                "normal": (nx, ny),
+                "heading": (hx, hy),
+                "yaw": math.atan2(hy, hx),
+                "docked": (cx, cy),
+                "pre": (cx - hx * DOCK_RUN, cy - hy * DOCK_RUN),
+            })
+        return poses
+
+    def choose_dock(self, robot_xy: tuple[float, float]) -> dict[str, Any]:
+        """Nearest face whose docking run is clear (falls back to nearest)."""
+        poses = sorted(
+            self.dock_poses(),
+            key=lambda d: math.hypot(d["pre"][0] - robot_xy[0], d["pre"][1] - robot_xy[1]),
+        )
+        if self._dock_clear is not None:
+            for d in poses:
+                if self._dock_clear(d["pre"], d["docked"]):
+                    return d
+        return poses[0]
 
     def _state_align_bin(self, inp: MissionInput) -> MissionOutput:
-        v = (self.bin_center[0] - inp.pose["x"], self.bin_center[1] - inp.pose["y"])
-        beta = math.atan2(DELIVER_OFFSET[1], DELIVER_OFFSET[0])
-        yaw_target = math.atan2(v[1], v[0]) - beta
-        err = wrap_angle(yaw_target - inp.pose["yaw"])
-        if abs(err) < YAW_TOL:
+        """Docking run: drive straight along the bin face to the docked pose,
+        holding heading and the face-parallel line (small steering
+        corrections), then UNLOAD. Bounded: a dock that cannot complete
+        (blocked, lost localization) is abandoned and the batch rides on."""
+        d = self._dock or self.choose_dock((inp.pose["x"], inp.pose["y"]))
+        self._dock = d
+        hx, hy = d["heading"]
+        rx = inp.pose["x"] - d["docked"][0]
+        ry = inp.pose["y"] - d["docked"][1]
+        remaining = -(rx * hx + ry * hy)          # distance still to go along the face
+        lateral = -rx * hy + ry * hx              # + = drifted left (toward the bin)
+        yaw_err = wrap_angle(d["yaw"] - inp.pose["yaw"])
+        self._dock_ticks += 1
+        if self._dock_ticks > DOCK_MAX_TICKS:
+            self._leftover_kg = inp.bin_kg
+            self._enter("SEARCH")
+            return MissionOutput(state="ALIGN_BIN", twist=(0.0, 0.0),
+                                 reason="dock timed out — batch rides to next trip")
+        if remaining <= DOCK_DONE_TOL and abs(yaw_err) < YAW_TOL:
             self.state = "UNLOAD"
             self._unload_cycles = 0
             self._unload_last_kg = None
             self._seq = _SeqState()
-            return MissionOutput(state="ALIGN_BIN", twist=(0.0, 0.0), reason="aligned with bin")
-        wz = max(-0.8, min(0.8, 1.5 * err))
-        return MissionOutput(state="ALIGN_BIN", twist=(0.0, wz), reason=f"rotating ({err:.2f} rad)")
+            return MissionOutput(state="ALIGN_BIN", twist=(0.0, 0.0), reason="docked at bin")
+        if remaining <= DOCK_DONE_TOL:
+            wz = max(-0.4, min(0.4, 1.5 * yaw_err))
+            return MissionOutput(state="ALIGN_BIN", twist=(0.0, wz),
+                                 reason=f"docked — squaring up ({yaw_err:.2f} rad)")
+        v = DOCK_SPEED if remaining > 0.15 else max(0.04, DOCK_SPEED * remaining / 0.15)
+        wz = max(-0.4, min(0.4, 2.0 * yaw_err - 3.0 * lateral))
+        return MissionOutput(state="ALIGN_BIN", twist=(v, wz),
+                             reason=f"docking ({remaining:.2f} m to go)")
 
     def _state_unload(self, inp: MissionInput) -> MissionOutput:
         """Empty the onboard bin BY ARM, one towel per cycle: reach into the
@@ -600,6 +689,9 @@ class MissionLogic:
     def _enter(self, state: str) -> None:
         """Transition to a new state, clearing any in-flight nav goal/sequence."""
         self.state = state
+        self._align_ticks = 0
+        if state == "TO_BIN":
+            self._dock = None   # choose the docking face afresh for each trip
         self._seq = _SeqState()
         self._nav_goal = None
         self._nav_anchor = None

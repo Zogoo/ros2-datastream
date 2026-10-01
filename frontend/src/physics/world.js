@@ -51,29 +51,61 @@ export class PhysicsWorld {
     return { body, collider };
   }
 
-  addDynamicBody({ position, shape, mass, friction, restitution, meta = null }) {
+  addDynamicBody({
+    position, shape, mass, friction, restitution, meta = null,
+    linearDamping = 0.2, angularDamping = 0.5,
+  }) {
     const body = this.world.createRigidBody(
       this.R.RigidBodyDesc.dynamic()
         .setTranslation(position[0], position[1], position[2])
-        .setLinearDamping(0.2)
-        .setAngularDamping(0.5),
+        .setLinearDamping(linearDamping)
+        .setAngularDamping(angularDamping),
     );
+    const collider = this.world.createCollider(
+      this.dynamicColliderDesc(shape, { mass, friction, restitution }), body,
+    );
+    if (meta) this.registerMeta(collider, meta);
+    return { body, collider };
+  }
+
+  /** Collider for a movable prop. shape.type: 'box' (size), 'roundBox'
+   *  (size + border — a soft-edged heap that neither rolls nor snags on its
+   *  corners, used for crumpled cloth) or 'cylinder' (radius, height). */
+  dynamicColliderDesc(shape, { mass, friction, restitution }, collisionGroups = null) {
     let desc;
     if (shape.type === 'box') {
       desc = this.R.ColliderDesc.cuboid(shape.size[0] / 2, shape.size[1] / 2, shape.size[2] / 2);
+    } else if (shape.type === 'roundBox') {
+      const r = shape.border;
+      desc = this.R.ColliderDesc.roundCuboid(
+        shape.size[0] / 2 - r, shape.size[1] / 2 - r, shape.size[2] / 2 - r, r,
+      );
     } else {
       desc = this.R.ColliderDesc.cylinder(shape.height / 2, shape.radius);
       // Rapier cylinders are Y-up; rotate so the axis is world Z.
       desc.setRotation({ w: Math.SQRT1_2, x: Math.SQRT1_2, y: 0, z: 0 });
     }
-    desc
+    return desc
       .setMass(mass)
       .setFriction(friction)
       .setRestitution(restitution)
-      .setCollisionGroups(groups(GROUP_OBJECT, OBJECT_FILTER));
+      .setCollisionGroups(collisionGroups ?? groups(GROUP_OBJECT, OBJECT_FILTER))
+      // Explicit solver membership (default is "all groups") so a collider
+      // can opt out of pushing props via its solver filter — the gripper
+      // volume does (see Arm._buildKinematicColliders).
+      .setSolverGroups(groups(GROUP_OBJECT, 0xffff));
+  }
+
+  /** Swap a body's collider for a new shape (cloth crumpling). Rapier cannot
+   *  morph a cuboid into a round cuboid in place, so the collider is rebuilt
+   *  on the same body, keeping its metadata registration. */
+  replaceCollider(body, oldCollider, desc) {
+    const meta = this.colliderMeta.get(oldCollider.handle);
+    this.colliderMeta.delete(oldCollider.handle);
+    this.world.removeCollider(oldCollider, true);
     const collider = this.world.createCollider(desc, body);
     if (meta) this.registerMeta(collider, meta);
-    return { body, collider };
+    return collider;
   }
 
   /** Raycast helper. filter is an interaction-groups value for the query. */
@@ -81,6 +113,13 @@ export class PhysicsWorld {
     const ray = new this.R.Ray(origin, dir);
     const hit = this.world.castRay(ray, maxToi, true, undefined, filter, undefined, excludeBody);
     return hit ? { toi: hit.timeOfImpact ?? hit.toi, collider: hit.collider } : null;
+  }
+
+  /** Raycast returning the surface normal too (for specular sensors). */
+  castRayNormal(origin, dir, maxToi, filter, excludeBody = null) {
+    const ray = new this.R.Ray(origin, dir);
+    const hit = this.world.castRayAndGetNormal(ray, maxToi, true, undefined, filter, undefined, excludeBody);
+    return hit ? { toi: hit.timeOfImpact ?? hit.toi, normal: hit.normal, collider: hit.collider } : null;
   }
 
   step() {

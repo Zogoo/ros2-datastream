@@ -23,7 +23,7 @@ Topics in:
   /arm/state               std_msgs/String  firmware status + gripper_holding
   /robot/control_mode      std_msgs/String  only acts in auto mode
   /robot/events            std_msgs/String  ARM_CONTACT -> abort in-flight sequence
-  /robot/held_object       std_msgs/String  display-only object_class label
+  /robot/held_object       std_msgs/String  gripper grasp flag + jaw width / grip force
   /safety/stop             std_msgs/Bool    aborts to IDLE
   /detected_objects        std_msgs/String  LLM context
   (MISSION_USE_GT) /ground_truth/{objects,pose}  eval-only fallback
@@ -55,7 +55,7 @@ from onsen_robot_state.session import SessionWatch
 
 from .arm_kinematics import GRASP_Z, ArmModel, grasp_command, load_arm_model
 from .llm_client import complete_json, create_llm_client
-from .mission import MissionInput, MissionLogic, world_to_robot
+from .mission import ROBOT_HALF_WIDTH, MissionInput, MissionLogic, world_to_robot
 
 SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -73,15 +73,22 @@ LLM_SYSTEM_PROMPT = (
 )
 
 
-def _towel_bin_center() -> tuple[float, float]:
+def _towel_bin() -> tuple[tuple[float, float], float]:
+    """(centre, half-size) of the towel floor bin from the layout."""
     try:
         with open(LAYOUT_PATH) as f:
             layout = json.load(f)
         bin_def = next(b for b in layout["bins"] if b["type"] == "towel")
-        return (float(bin_def["c"][0]), float(bin_def["c"][1]))
+        return (float(bin_def["c"][0]), float(bin_def["c"][1])), float(max(bin_def["size"])) / 2
     except (OSError, StopIteration, KeyError, json.JSONDecodeError):
-        return (0.0, 4.45)
+        return (0.0, 4.45), 0.44
 
+
+# Max age of /detected_objects used for the direct base_link reach.
+DETECTION_MAX_AGE_S = 0.5
+# Max distance between a detection and the target's expected base_link
+# position for the detection to be associated with the target.
+TARGET_ASSOC_GATE_M = 0.25
 
 # The scoop overshoots slightly past the towel; the reach line is probed to
 # this far beyond the towel center. Matches the fingertip travel of PICK_SCOOP.
@@ -132,6 +139,38 @@ def _make_reach_clear():
     return reach_clear
 
 
+def _make_dock_clear():
+    """DockClear seam for MissionLogic: the pre-dock pose is free in the
+    ROBOT_RADIUS-inflated grid (the robot can stand and turn there) and the
+    straight docking run to the docked pose has line-of-sight on a grid
+    inflated by the robot's HALF-WIDTH only — the run passes the bin face at
+    DOCK_SIDE_GAP, so the bin itself stays clear of that thinner inflation,
+    while any other wall/prop along the run blocks the face. None when the
+    nav grid can't be built (the nearest face is then used unchecked)."""
+    try:
+        from onsen_nav.astar import line_of_sight
+        from onsen_nav.grid import FREE, NavGrid
+    except ImportError:
+        return None
+    try:
+        grid = NavGrid.from_file(LAYOUT_PATH)
+    except (OSError, KeyError, json.JSONDecodeError):
+        return None
+    inflated = grid.inflated(STANDOFF_ROBOT_RADIUS)
+    side = grid.inflated(ROBOT_HALF_WIDTH + 0.02)
+
+    def dock_clear(pre: tuple[float, float], docked: tuple[float, float]) -> bool:
+        prow, pcol = grid.world_to_cell(pre[0], pre[1])
+        drow, dcol = grid.world_to_cell(docked[0], docked[1])
+        if not (grid.in_bounds(prow, pcol) and grid.in_bounds(drow, dcol)):
+            return False
+        if inflated[prow, pcol] != FREE:
+            return False
+        return line_of_sight(side, (prow, pcol), (drow, dcol))
+
+    return dock_clear
+
+
 def _yaw_from_quat(q) -> float:
     return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
 
@@ -149,8 +188,11 @@ class MissionExecutorNode(Node):
         reach_clear = _make_reach_clear()
         if reach_clear is None:
             self.get_logger().warning("nav grid unavailable — pick standoffs not wall-checked")
+        dock_clear = _make_dock_clear()
+        bin_center, bin_half = _towel_bin()
         self._logic = MissionLogic(
-            bin_center=_towel_bin_center(), ik_reach=ik_reach, reach_clear=reach_clear,
+            bin_center=bin_center, ik_reach=ik_reach, reach_clear=reach_clear,
+            bin_half=bin_half, dock_clear=dock_clear,
         )
         self._llm = create_llm_client()
         self._llm_consult_interval = float(os.environ.get("MISSION_LLM_INTERVAL", "5.0"))
@@ -163,7 +205,7 @@ class MissionExecutorNode(Node):
         self._odom_pose: dict | None = None
         self._towels: list[dict] = []
         self._holding = False
-        self._held_class: str | None = None  # object class currently in gripper
+        self._jaw_width_m: float | None = None  # measured jaw width (gripper feedback)
         self._gripper_holding_sensor = False  # wrist-load-cell confirmation (telemetry)
         self._bin_kg = 0.0        # collect-bin load cell (from /base/state)
         self._bin_full = False
@@ -173,6 +215,7 @@ class MissionExecutorNode(Node):
         self._nav_status = "idle"
         self._min_front: float | None = None
         self._detections: list[dict] = []
+        self._detections_at = 0.0   # monotonic receive time of _detections
         self._session = SessionWatch()
         self._arm_contact_pending = False  # one-shot edge, consumed each _tick
 
@@ -277,18 +320,22 @@ class MissionExecutorNode(Node):
 
     def _on_held_object(self, msg: String) -> None:
         """Authoritative holding source (both modes): the gripper's own
-        grasp-state feedback, published by the FE on every grasp change. This
-        is the reliable "did my commanded grasp engage an object" signal a real
-        gripper controller reports. The wrist-load-cell force on /joint_states
-        (-> gripper_holding on /arm/state) is an INDEPENDENT force-based
-        confirmation sensor kept for telemetry/observability, not the primary
-        control gate."""
+        grasp-state feedback — the jaws stalled on an object short of their
+        commanded closure (published on change + 1 Hz keepalive). This is the
+        "did my commanded grasp engage an object" flag a real gripper
+        controller reports; it carries no object identity. If the cloth pulls
+        out mid-carry the jaws collapse and the flag drops (GRASP_SLIPPED), so
+        the FSM's post-sequence holding checks catch slips. The wrist-load-cell
+        force on /joint_states (-> gripper_holding on /arm/state) is an
+        INDEPENDENT force-based confirmation sensor kept for
+        telemetry/observability, not the primary control gate."""
         try:
             data = json.loads(msg.data)
         except json.JSONDecodeError:
             return
         self._holding = bool(data.get("held", False))
-        self._held_class = data.get("object_class")
+        jaw = data.get("jaw_width_m")
+        self._jaw_width_m = float(jaw) if isinstance(jaw, (int, float)) else None
 
     def _on_event(self, msg: String) -> None:
         """ARM_CONTACT is the only event still processed here — held-state
@@ -368,6 +415,7 @@ class MissionExecutorNode(Node):
     def _on_detections(self, msg: String) -> None:
         try:
             self._detections = json.loads(msg.data).get("objects", [])
+            self._detections_at = time.monotonic()
         except json.JSONDecodeError:
             pass
 
@@ -392,9 +440,21 @@ class MissionExecutorNode(Node):
         target = self._logic.target
         if target is None or self._pose is None:
             return None
+        # A detection is a base_link position AT CAPTURE TIME. Once the robot
+        # has moved/rotated since, it points the wrong way — a stale one held
+        # the ALIGN_PICK bearing constant and spun the robot in circles when
+        # camera frames lagged under load.
+        if time.monotonic() - self._detections_at > DETECTION_MAX_AGE_S:
+            return None
         expected = world_to_robot(target["position"], self._pose)
         best = None
-        best_d = 0.6   # m gate: a detection must be near the expected reach
+        # Data-association gate. Depth-ranged towel positions are good to
+        # ~5 cm and the expected position (track / GT through the pose) to
+        # ~10 cm, so anything farther is a DIFFERENT blob — notably the robot's
+        # own cream-white arm entering the bottom of the frame during a reach,
+        # which a loose 0.6 m gate accepted and sent the IK grasping at bare
+        # floor beside the towel.
+        best_d = TARGET_ASSOC_GATE_M
         for det in self._detections:
             if det.get("class") != "towel":
                 continue
@@ -452,7 +512,7 @@ class MissionExecutorNode(Node):
             "reason": out.reason,
             "target_id": out.target_id or (self._logic.target or {}).get("id"),
             "holding": self._holding,
-            "held_class": self._held_class,
+            "jaw_width_m": self._jaw_width_m,
             "gripper_holding_sensor": self._gripper_holding_sensor,
             "bin_kg": self._bin_kg,
             "bin_full": self._bin_full,

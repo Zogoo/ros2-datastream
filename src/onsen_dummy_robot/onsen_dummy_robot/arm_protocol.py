@@ -28,13 +28,19 @@ HOME_POSE = [90.0, 90.0, 90.0, 90.0, 90.0, 70.0]
 # gripper_holding derivation: this arm uses an edge slide/scoop grasp (see
 # robot_design.md), not a two-finger pinch, so there is no jaw-width signal to
 # read back — the honest equivalent is the wrist load cell's axial force, i.e.
-# the WEIGHT of the payload (mass * g). Pose-independent: a 0.25 kg towel reads
-# ~2.45 N whether the arm is extended or lifted vertical (shoulder torque would
+# the WEIGHT of the payload (mass * g). Pose-independent: a damp 0.25 kg towel
+# reads ~2.45 N whether the arm is extended or lifted vertical (shoulder torque would
 # collapse to 0 in the lifted pose — see arm.js _updateEffort). An empty gripper
 # reads ~0. The threshold sits well below the lightest payload's weight with
 # headroom, and the debounce absorbs a single stale/startup reading.
 EFFORT_HOLD_THRESHOLD_N = 0.5
 EFFORT_HOLD_DEBOUNCE_S = 0.3
+# Jaw-stall detection: the gripper servo's MEASURED angle (fed back from
+# /joint_states) stops short of the commanded angle when the jaws squeeze an
+# object — the classic parallel-gripper "object detected" signal. Only judged
+# once the firmware has finished interpolating (servo lag would otherwise read
+# as a stall mid-move).
+JAW_STALL_MARGIN_DEG = 4.0
 
 # Pose table tuned against the simulator FK (shared/robot_spec.json: joint_ratio
 # 1.5, links 0.25/0.25/0.20 m, shoulder at z=0.50). PICK_SCOOP puts the
@@ -108,6 +114,7 @@ class ArmFirmware:
         self._payload_force = 0.0
         self._holding_since: float | None = None
         self._holding = False
+        self._jaw_measured: float | None = None
         if cal_path and os.path.exists(cal_path):
             self._load_cal()
 
@@ -133,7 +140,22 @@ class ArmFirmware:
             "queue_depth": len(self._segments),
             "gripper_holding": self._holding,
             "payload_force_n": round(self._payload_force, 3),
+            "jaw_measured_deg": (
+                None if self._jaw_measured is None else round(self._jaw_measured, 1)
+            ),
+            "jaw_stalled": self.jaw_stalled,
         }
+
+    @property
+    def jaw_stalled(self) -> bool:
+        """Jaws stopped short of the commanded closure => squeezing something."""
+        if self._jaw_measured is None or self._segments:
+            return False
+        return self._jaw_measured - self._pos[GRIPPER] > JAW_STALL_MARGIN_DEG
+
+    def observe_jaw(self, measured_deg: float) -> None:
+        """Feed back the gripper servo's measured position (degrees)."""
+        self._jaw_measured = measured_deg
 
     # ── Tick ──────────────────────────────────────────────────────────────────
 

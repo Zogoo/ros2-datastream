@@ -35,6 +35,12 @@ export class DepthCamera {
     this.accumulator %= 1 / this.spec.hz;
 
     poseFn(this.camera, this.spec);
+    // Steam sprites are translucent light scatter, not surfaces: under the
+    // depth override material they would render as solid, non-billboarded
+    // slabs (phantom walls in the sauna). Hide them for the depth pass.
+    const sprites = [];
+    this.scene.traverseVisible((o) => { if (o.isSprite) sprites.push(o); });
+    for (const sp of sprites) sp.visible = false;
     const prevOverride = this.scene.overrideMaterial;
     this.scene.overrideMaterial = this.depthMaterial;
     this.renderer.setRenderTarget(this.target);
@@ -44,6 +50,7 @@ export class DepthCamera {
     );
     this.renderer.setRenderTarget(null);
     this.scene.overrideMaterial = prevOverride;
+    for (const sp of sprites) sp.visible = true;
 
     this._convertAndPublish();
   }

@@ -141,12 +141,13 @@ Known limitations (documented, mitigated):
   the chain's **negative-radial arc**: DROP_BASKET keeps pan forward and arcs
   the arm up over its own shoulder. BIN_PICK reaches back INSIDE the bin to lift
   towels out again
-- Towels are carried **crumpled** so they land and stack in the tray in any
-  orientation; reset() un-crumples
+- Towels are carried **crumpled** (hanging below the jaws) so they land and
+  stack in the tray in any orientation; reset() refolds
 - **Load cell**: single-point strain gauge + HX711 under the bin floor. FE
   publishes the measured weight on `/robot/bin_load` at 2 Hz with noise; the
-  base firmware debounce-thresholds it into `bin_full` at 0.70 kg ≈ 3 towels on
-  `/base/state`. The load cell closes THREE loops: **stow verification** (a
+  base firmware debounce-thresholds it into `bin_full` at 0.70 kg — 2 to 4
+  towels, because used onsen towels are damp (0.18–0.33 kg each, 0.42 kg
+  soaked; a load cell weighs, it cannot count). The load cell closes THREE loops: **stow verification** (a
   release only counts once the weight rises by a towel), **full detection**, and
   the **unload loop condition**
 - **Delivery is BY ARM** (UNLOAD): BIN_PICK → CLOSE_GRIPPER → DROP_BIN →
@@ -155,12 +156,23 @@ Known limitations (documented, mitigated):
   as a maintenance/floor-dump feature
 - Mission policy: PICK → STOW (load-cell-verified) → SEARCH … until `bin_full`
   or no towels remain, then one TO_BIN → ALIGN_BIN → UNLOAD trip
-- **Grasp is a physics joint / kinematic carry**: on grasp the held item's
-  Rapier body switches to `KinematicPositionBased` and is driven to
-  `fingertip + carryOffset` every tick — no joint stress, no wall-sticking. On
-  release it switches back to `Dynamic` with the current fingertip velocity
+- **Grasp is a parallel-jaw pinch** (`arm.js`, `ObjectManager.pinchCandidate`):
+  the jaws catch a towel only if, while closing from wider than the cloth bite,
+  the finger pads (reaching `jaw_reach_m` 45 mm below the tool point) straddle
+  part of its footprint (a hem 15 mm past the edge still catches) and bite at
+  least 4 mm into it. The gripper servo then **stalls** at the compressed bite
+  width (12 mm folded / 22 mm crumpled) — visible on `/joint_states` and as
+  `jaw_stalled` on `/arm/state`. Holding capacity = 7 N × bite quality × cloth
+  variability; once the towel is lifted off the floor, weight + inertial load
+  above capacity pulls it out (`GRASP_SLIPPED`): shallow hem pinches of heavy
+  wet towels fail as on hardware. Carry is kinematic (no wall-sticking): the
+  towel hangs 6 cm below the jaws in the gripper heading with a short settle
+  lag; on release it becomes dynamic with its carry velocity. The gripper
+  volume detects walls (ARM_CONTACT) but no longer shoves props — the old
+  descending jaw ball pushed towels out from under itself
 - **Holding detection — two signals**: the mission gates on the gripper's own
-  grasp-state feedback (`/robot/held_object`); a wrist load cell provides
+  grasp-state feedback (`/robot/held_object` — the jaw-stall flag, no object
+  identity); a wrist load cell provides
   independent force-based confirmation on the wrist effort channel of
   `/joint_states`, thresholded into `gripper_holding` on `/arm/state`. See
   docs/research_notes.md for why the direct grasp-state feedback is the control

@@ -159,18 +159,16 @@ export class OnsenWorld {
   }
 
   binAt(x, y, z) {
-    // Delivery tolerance. The arm's DROP_BIN side-reach (pan 178°) carries the
-    // towel to the bin vicinity and releases it; measured release placement
-    // lands within ~0.4 m of the bin centre (release velocity + the robot
-    // standoff geometry — it cannot get within bin-half+robot-half ≈ 0.5 m of a
-    // floor bin). The scoring volume tolerates that spread so a towel reliably
-    // carried to and dropped at the bin counts as delivered, rather than
-    // demanding sub-footprint drop precision the side-reach can't guarantee.
-    const margin = 0.4;
+    // An object is IN a bin only when its centre is inside the bin's interior
+    // (walls are 20 mm thick) and below the rim. No delivery tolerance: a
+    // towel dropped beside the bin is on the floor, still pickable, and the
+    // mission has to notice (via perception/the load cell) that it missed.
+    const wall = 0.01;
     return this.bins.find(
-      (b) => inRect(x, y, expandRect(b.rect, margin)) && z < b.rimZ + 0.05,
+      (b) => inRect(x, y, expandRect(b.rect, -wall)) && z < b.rimZ,
     ) ?? null;
   }
+
 }
 
 const expandRect = (r, m) => [r[0] - m, r[1] - m, r[2] + m, r[3] + m];

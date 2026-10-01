@@ -19,21 +19,22 @@ export class LidarSensor {
     this.n = this.spec.num_rays;
     this.ranges = new Float32Array(this.n);
     this.index = 0;
-    this.raysPerTick = Math.ceil((this.n * this.spec.hz) / 60);
+    this.raysPerTick = Math.ceil(this.n * this.spec.hz * clock.step);
     this.lastScan = null;
   }
 
   update() {
     const origin = this.robot.worldPoint(this.spec.position);
-    const yaw = this.robot.pose().yaw;
     const steam = this.world.steamDensityAt(origin.x, origin.y);
     const angleInc = (2 * Math.PI) / this.n;
 
     for (let k = 0; k < this.raysPerTick; k++) {
       const i = this.index;
       const beamAngle = -Math.PI + i * angleInc;
-      const a = yaw + beamAngle;
-      const dir = { x: Math.cos(a), y: Math.sin(a), z: 0 };
+      // The scan plane is fixed to the chassis: it pitches/rolls with the
+      // body (braking, steps), so beams can dip into the floor like a real
+      // head-mounted 2D scanner's do.
+      const dir = this.robot.worldDir([Math.cos(beamAngle), Math.sin(beamAngle), 0]);
       const hit = this.physics.castRay(origin, dir, this.spec.range_max, QUERY, this.robot.body);
 
       let range = hit ? hit.toi : Infinity;
@@ -42,7 +43,9 @@ export class LidarSensor {
         if (steam > 0) range += this.rng.gaussian(0, this.spec.steam_noise_std * steam);
         const dropout = this.spec.dropout_prob + steam * this.spec.steam_dropout_prob;
         if (this.rng.uniform() < dropout) range = Infinity;
-        if (range < this.spec.range_min) range = this.spec.range_min;
+        // Too close to measure: the RPLIDAR reports no return (0 -> inf),
+        // not an obstacle pinned at range_min.
+        if (range < this.spec.range_min) range = Infinity;
       }
       this.ranges[i] = range;
       this.index += 1;
@@ -63,7 +66,8 @@ export class LidarSensor {
     this.ros.publish(TOPICS.scan, {
       header: { stamp: this.clock.stamp(), frame_id: this.spec.frame_id },
       angle_min: -Math.PI,
-      angle_max: Math.PI,
+      // n beams => angle_max = angle_min + (n - 1) * inc (REP-138 beam count)
+      angle_max: -Math.PI + (this.n - 1) * ((2 * Math.PI) / this.n),
       angle_increment: (2 * Math.PI) / this.n,
       time_increment: scanTime / this.n,
       scan_time: scanTime,

@@ -92,6 +92,35 @@ class TestCameraModel:
         assert near["x"] < far["x"]
 
 
+class TestFootprintCenter:
+    def test_flat_towel_positioned_at_footprint_centre_not_near_edge(self):
+        cam = CameraModel(TestCameraModel.CAM_SPEC)
+        det = Detector(camera_model=cam)
+        x, y, w, h = 260, 300, 120, 80
+        foot = cam.pixel_to_base_link(x + w / 2, y + h)
+        far = cam.pixel_to_base_link(x + w / 2, y)
+        towel = det.footprint_center("towel", x, y, w, h)
+        assert foot is not None and far is not None and towel is not None
+        assert foot["x"] < towel["x"] < far["x"]
+        assert towel["x"] == pytest.approx((foot["x"] + far["x"]) / 2, abs=0.01)
+
+    def test_bottom_truncated_towel_steps_back_from_far_edge(self):
+        cam = CameraModel(TestCameraModel.CAM_SPEC)
+        det = Detector(camera_model=cam)
+        x, y, w = 260, 380, 120
+        h = cam.height - y          # bbox runs into the frame bottom
+        far = cam.pixel_to_base_link(x + w / 2, y)
+        towel = det.footprint_center("towel", x, y, w, h)
+        assert far is not None and towel is not None
+        assert towel["x"] == pytest.approx(far["x"] - detection.FLAT_HALF_DEPTH_M, abs=0.02)
+
+    def test_tall_object_stays_on_its_foot(self):
+        cam = CameraModel(TestCameraModel.CAM_SPEC)
+        det = Detector(camera_model=cam)
+        stool = det.footprint_center("stool", 260, 300, 120, 80)
+        assert stool == cam.pixel_to_base_link(320, 380)
+
+
 class TestNms:
     def test_overlapping_detections_suppressed(self):
         dets = [

@@ -17,6 +17,7 @@ export class OdomSensor {
     const p = robot.pose();
     this.pose = { x: p.x, y: p.y, yaw: p.yaw, v: 0, w: 0 };
     this.wheelAngles = [0, 0];
+    this.travel = { dist: 0, rot: 0 };   // for the growing pose covariance
   }
 
   /** Re-anchor the integrator after a staged teleport (window.__sim.setPose).
@@ -24,12 +25,15 @@ export class OdomSensor {
    *  localizer's small search window can't bridge the jump. */
   reset(x, y, yaw) {
     this.pose = { x, y, yaw, v: 0, w: 0 };
+    this.travel = { dist: 0, rot: 0 };
   }
 
   update(dt) {
     const { driven } = this.spec.wheels;
     const { left, right } = this.robot.suspension.sideSurfaceSpeeds();
     this.pose = integrateOdometry(this.pose, left, right, driven.track_width, dt);
+    this.travel.dist += Math.abs(this.pose.v) * dt;
+    this.travel.rot += Math.abs(this.pose.w) * dt;
     this.wheelAngles[0] += (left / driven.radius) * dt;
     this.wheelAngles[1] += (right / driven.radius) * dt;
 
@@ -50,14 +54,15 @@ export class OdomSensor {
           position: { x: round3(this.pose.x), y: round3(this.pose.y), z: 0 },
           orientation: q,
         },
-        covariance: new Array(36).fill(0),
+        covariance: this._poseCovariance(),
       },
       twist: {
         twist: {
           linear: { x: round3(this.pose.v), y: 0, z: 0 },
           angular: { x: 0, y: 0, z: round3(this.pose.w) },
         },
-        covariance: new Array(36).fill(0),
+        // encoder speed noise / skid on turns
+        covariance: diag6([4e-4, 1e-6, 1e-6, 1e-6, 1e-6, 2.5e-3]),
       },
     });
     this.ros.publish(TOPICS.tf, {
@@ -80,6 +85,20 @@ export class OdomSensor {
       },
     });
   }
+
+  /** Dead-reckoning uncertainty grows with travel (a filter must not treat
+   *  wheel odometry as exact): ~2 % of distance in x/y, ~5 % of accumulated
+   *  rotation in yaw (skid-steer slip), z/roll/pitch unobserved. */
+  _poseCovariance() {
+    const sxy = 0.02 * this.travel.dist + 0.001;
+    const syaw = 0.05 * this.travel.rot + 0.002;
+    return diag6([sxy * sxy, sxy * sxy, 1e6, 1e6, 1e6, syaw * syaw]);
+  }
 }
 
 const round3 = (v) => Math.round(v * 1000) / 1000;
+function diag6(d) {
+  const c = new Array(36).fill(0);
+  for (let i = 0; i < 6; i++) c[i * 7] = d[i];
+  return c;
+}

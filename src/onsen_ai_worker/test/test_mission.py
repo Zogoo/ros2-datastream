@@ -11,6 +11,8 @@ import math
 import pytest
 
 from onsen_ai_worker.mission import (
+    DELIVER_OFFSET,
+    DOCK_SIDE_GAP,
     GLOBAL_FAIL_LIMIT,
     MAX_APPROACH_RETRIES,
     MAX_PICK_ATTEMPTS,
@@ -18,12 +20,14 @@ from onsen_ai_worker.mission import (
     NAV_LIMBO_TICKS,
     PICK_SEQUENCE,
     PICK_TOL_X,
+    ROBOT_HALF_WIDTH,
     SCOOP_FORWARD,
     STOW_SEQUENCE,
     UNLOAD_CYCLE,
     MissionInput,
     MissionLogic,
     MissionOutput,
+    world_to_robot,
 )
 
 BIN_CENTER = (0.0, 4.45)
@@ -335,31 +339,73 @@ class TestPickSequence:
 
 
 class TestDelivery:
-    def test_to_bin_navigates_then_aligns_then_unloads(self):
+    def test_to_bin_navigates_then_docks_then_unloads(self):
         logic = MissionLogic(BIN_CENTER)
         logic.state = "TO_BIN"
         pose = {"x": 0.0, "y": 0.0, "yaw": math.pi / 2}
 
         first = logic.update(make_input(pose, bin_kg=0.5))
         assert first.nav_goal is not None, "TO_BIN must emit a nav goal"
-        # play nav to success
+        gx, gy, gyaw = first.nav_goal
+        # play nav to success; the robot arrives at the pre-dock pose (with a
+        # little localization error)
         status = "active"
+        apose = {"x": gx + 0.03, "y": gy - 0.02, "yaw": gyaw + 0.04}
         for _ in range(8):
-            out = logic.update(make_input(pose, bin_kg=0.5, nav_status=status))
+            out = logic.update(make_input(apose, bin_kg=0.5, nav_status=status))
             if logic.state != "TO_BIN":
                 break
             status = "succeeded"
         assert logic.state == "ALIGN_BIN"
 
-        # rotate to alignment -> UNLOAD (arm empties the bin over the floor bin)
-        apose = dict(pose)
-        for _ in range(200):
+        # straight docking run along the bin face -> UNLOAD
+        dt = 0.2
+        for _ in range(300):
             out = logic.update(make_input(apose, bin_kg=0.5))
             if logic.state != "ALIGN_BIN":
                 break
             assert out.twist is not None
-            apose["yaw"] += out.twist[1] * 0.1
+            v, wz = out.twist
+            apose["yaw"] += wz * dt
+            apose["x"] += v * math.cos(apose["yaw"]) * dt
+            apose["y"] += v * math.sin(apose["yaw"]) * dt
         assert logic.state == "UNLOAD"
+        # docked: bin centre lies to the LEFT at the designed lateral offset
+        rel = world_to_robot({"x": BIN_CENTER[0], "y": BIN_CENTER[1]}, apose)
+        assert rel[0] == pytest.approx(DELIVER_OFFSET[0], abs=0.05)
+        assert rel[1] == pytest.approx(0.44 + DOCK_SIDE_GAP + ROBOT_HALF_WIDTH, abs=0.05)
+
+    def test_docked_footprint_clears_bin_and_release_lands_inside(self):
+        logic = MissionLogic(BIN_CENTER)
+        for d in logic.dock_poses():
+            dx, dy = d["docked"]
+            hx, hy = d["heading"]
+            # bin centre in base_link
+            bx, by = BIN_CENTER[0] - dx, BIN_CENTER[1] - dy
+            lx, ly = bx * hx + by * hy, -bx * hy + by * hx
+            # robot's left side (y = +half-width) stays short of the bin face
+            assert ly - 0.44 - ROBOT_HALF_WIDTH == pytest.approx(DOCK_SIDE_GAP)
+            # DROP_BIN release point is inside the bin interior
+            rx, ry = DELIVER_OFFSET[0] - lx, DELIVER_OFFSET[1] - ly
+            assert abs(rx) < 0.44 - 0.1 and abs(ry) < 0.44 - 0.1
+
+    def test_blocked_face_is_skipped(self):
+        nearest_first = MissionLogic(BIN_CENTER).choose_dock((0.0, 0.0))
+        logic = MissionLogic(BIN_CENTER, dock_clear=lambda pre, docked: pre != nearest_first["pre"])
+        chosen = logic.choose_dock((0.0, 0.0))
+        assert chosen["pre"] != nearest_first["pre"]
+
+    def test_dock_that_never_completes_is_abandoned(self):
+        logic = MissionLogic(BIN_CENTER)
+        logic.state = "TO_BIN"
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        logic.update(make_input(pose, bin_kg=0.5))
+        logic._enter("ALIGN_BIN")
+        for _ in range(400):   # robot never moves (blocked)
+            logic.update(make_input(pose, bin_kg=0.5))
+            if logic.state != "ALIGN_BIN":
+                break
+        assert logic.state == "SEARCH"
 
     def _run_unload(self, logic, kg_per_cycle):
         """Plays the arm through unload cycles. kg_per_cycle is the load-cell
@@ -721,15 +767,27 @@ class TestAlignHysteresis:
         logic = self._logic_with_towel_at_bearing(0.20)   # above entry -> rotate
         pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         out = logic.update(make_input(pose, [logic.target]))
-        assert out.reason == "aligning bearing"
+        assert out.reason.startswith("aligning bearing")
         # bearing now 0.08: between exit (0.05) and entry (0.12) -> STILL rotating
         logic.target = towel(math.cos(0.08), math.sin(0.08))
         out = logic.update(make_input(pose, [logic.target]))
-        assert out.reason == "aligning bearing", "must not flip to driving mid-band"
+        assert out.reason.startswith("aligning bearing"), "must not flip to driving mid-band"
         # below exit threshold -> switches to closing the gap
         logic.target = towel(math.cos(0.03), math.sin(0.03))
         out = logic.update(make_input(pose, [logic.target]))
         assert "closing gap" in out.reason
+
+    def test_alignment_that_never_settles_is_a_failed_attempt(self):
+        """A frozen measurement (or an unreachable spot) must not spin the
+        robot forever: ALIGN_PICK is bounded and feeds the retry/park logic."""
+        logic = self._logic_with_towel_at_bearing(1.0)
+        pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}   # robot never turns (frozen input)
+        for _ in range(200):
+            out = logic.update(make_input(pose, [logic.target]))
+            if logic.state != "ALIGN_PICK":
+                break
+        assert logic.state == "SEARCH"
+        assert "align" in out.reason
 
     def test_no_rotation_when_starting_inside_band(self):
         logic = self._logic_with_towel_at_bearing(0.08)   # inside band, not aligning

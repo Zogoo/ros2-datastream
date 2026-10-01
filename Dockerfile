@@ -3,8 +3,11 @@ FROM ros:lyrical-ros-core
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ROS_DISTRO=lyrical
 
-# System dependencies
-RUN apt-get update && apt-get install -y \
+# System dependencies. `apt-get upgrade` first: lyrical is a rolling-style
+# distro, so freshly installed ros-lyrical-* packages can be newer than the
+# base image's rosidl/rmw libs — a mixed set fails at runtime with
+# "undefined symbol: has_buffer_fields_*" (rosbridge dies on start).
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     python3-pip \
     python3-numpy \
     python3-opencv \

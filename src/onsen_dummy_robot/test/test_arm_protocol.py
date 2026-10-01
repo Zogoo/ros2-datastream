@@ -2,6 +2,8 @@
 robot's arm controller exposes, including the user-facing sample session."""
 from __future__ import annotations
 
+import time
+
 from onsen_dummy_robot.arm_protocol import (
     ACTIONS,
     EFFORT_HOLD_DEBOUNCE_S,
@@ -139,6 +141,39 @@ class TestGripperHolding:
         arm = fw()
         arm.observe_effort(2.45, now=0.0)
         assert arm.state_dict()["payload_force_n"] == 2.45
+
+
+class TestJawStall:
+    """jaw_stalled: the gripper servo's MEASURED angle stops short of the
+    commanded closure when the jaws squeeze cloth (fed back from
+    /joint_states) — the parallel-gripper object-detected signal."""
+
+    def _closed(self):
+        arm = fw()
+        arm.handle("G 12 0")
+        arm.tick(now=time.monotonic() + 1.0)
+        return arm
+
+    def test_no_feedback_is_not_stalled(self):
+        assert self._closed().state_dict()["jaw_stalled"] is False
+
+    def test_jaws_closed_on_air_are_not_stalled(self):
+        arm = self._closed()
+        arm.observe_jaw(12.5)
+        assert arm.state_dict()["jaw_stalled"] is False
+
+    def test_jaws_stopped_on_cloth_are_stalled(self):
+        arm = self._closed()
+        arm.observe_jaw(24.0)   # 12 mm bite on a 90 mm / 180 deg gripper
+        state = arm.state_dict()
+        assert state["jaw_stalled"] is True
+        assert state["jaw_measured_deg"] == 24.0
+
+    def test_not_judged_while_moving(self):
+        arm = fw()
+        arm.handle("G 12 2000")
+        arm.observe_jaw(60.0)   # servo still travelling
+        assert arm.state_dict()["jaw_stalled"] is False
 
 
 class TestErrors:

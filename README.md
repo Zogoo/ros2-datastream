@@ -132,6 +132,7 @@ Full topic contract: [docs/topics.md](docs/topics.md). Expected healthy rates:
 | `REALISM_PROFILE` | `low` | Sensor degradation: `low` / `medium` / `high` |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | unset | OpenAI-compatible endpoint for the planner; deterministic mock when unset |
 | `SAVE_DATASET` | `false` | Synthetic mode dataset dump |
+| `FOXGLOVE_PORT` | `8765` | Foxglove bridge port (host network) — override when another local service owns 8765 |
 
 ## Documentation
 

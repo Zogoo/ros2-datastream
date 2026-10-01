@@ -112,8 +112,14 @@ A broken layout fails schema tests, not runtime.
 
 ## Key trade-offs (deliberate, documented)
 
-- **Towels are rigid low-profile boxes**, not cloth: grasp/flatten/float
-  behavior is preserved at a fraction of the complexity (KISS)
+- **Towels are rigid-body cloth proxies**, not a cloth solver: two physical
+  states (a 16 mm folded slab / a rounded 7 cm crumpled heap — handling
+  crumples for good), cloth-like air drag and no bounce, and a wetness state
+  (used towels are damp, soak in pools and sink, wick from wet floors) that
+  drives mass 0.12–0.42 kg. Grasping is a geometric parallel-jaw pinch with
+  jaw stall, grip-force capacity and slip — no snap radius. The behavior an
+  AI worker must cope with (variable payload, missed and slipped grasps,
+  towels that land beside the bin) is real; the fabric drape is not (KISS)
 - **Skins are visual-only**: physics stays bound to the class so a re-skinned
   towel still grasps and floats — only *perception* is challenged
 - **Mission navigation uses `/ground_truth/objects` for towel world positions**
